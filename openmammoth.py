@@ -81,14 +81,10 @@ class OpenMammoth:
         self.load_threat_intel()
         self.load_ip_lists()
         
+        # Just show a warning if no interfaces found, don't block further execution
         if not self.available_interfaces:
             print(f"{Fore.RED}Warning: No network interfaces found!{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Please check and configure your network interfaces.{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Recommended steps:{Style.RESET_ALL}")
-            print("1. Check your network connection")
-            print("2. Configure your network interfaces")
-            print("3. Restart the program")
-            input("\nPress Enter to return to main menu...")
+            print(f"{Fore.YELLOW}You can reconfigure interfaces from the main menu.{Style.RESET_ALL}")
 
     def get_ascii_art(self):
         return f"""{Fore.RED}
@@ -635,11 +631,12 @@ class OpenMammoth:
             print(f"{Fore.BLUE}4. View Statistics{Style.RESET_ALL}")
             print(f"{Fore.MAGENTA}5. View Blocked IPs{Style.RESET_ALL}")
             print(f"{Fore.CYAN}6. Advanced Options{Style.RESET_ALL}")
-            print(f"{Fore.WHITE}7. Help{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}8. About{Style.RESET_ALL}")
-            print(f"{Fore.RED}9. Exit{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}7. Configure Network Interfaces{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}8. Help{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}9. About{Style.RESET_ALL}")
+            print(f"{Fore.RED}0. Exit{Style.RESET_ALL}")
             
-            choice = input("\nEnter your choice (1-9): ")
+            choice = input("\nEnter your choice (0-9): ")
             
             if choice == "1":
                 self.start_protection()
@@ -654,10 +651,12 @@ class OpenMammoth:
             elif choice == "6":
                 self.advanced_options()
             elif choice == "7":
-                self.show_help()
+                self.configure_interfaces()
             elif choice == "8":
-                self.show_about()
+                self.show_help()
             elif choice == "9":
+                self.show_about()
+            elif choice == "0":
                 if self.is_running:
                     self.stop_protection()
                 print(f"{Fore.GREEN}Goodbye!{Style.RESET_ALL}")
@@ -1129,12 +1128,6 @@ class OpenMammoth:
         print(f"\n{Fore.CYAN}=== Available Network Interfaces ==={Style.RESET_ALL}")
         if not self.available_interfaces:
             print(f"{Fore.RED}Warning: No network interfaces found!{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Please check and configure your network interfaces.{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Recommended steps:{Style.RESET_ALL}")
-            print("1. Check your network connection")
-            print("2. Configure your network interfaces")
-            print("3. Restart the program")
-            input("\nPress Enter to return to main menu...")
             return False
         
         for idx, iface in enumerate(self.available_interfaces, 1):
@@ -1149,12 +1142,6 @@ class OpenMammoth:
         """Select network interface"""
         if not self.available_interfaces:
             print(f"{Fore.RED}Warning: No network interfaces found!{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Please check and configure your network interfaces.{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Recommended steps:{Style.RESET_ALL}")
-            print("1. Check your network connection")
-            print("2. Configure your network interfaces")
-            print("3. Restart the program")
-            input("\nPress Enter to return to main menu...")
             return False
         
         if not self.display_interfaces():
@@ -1501,6 +1488,26 @@ class OpenMammoth:
                 logging.info(f"Detected local IPs: {', '.join(self.local_ips)}")
         except Exception as e:
             logging.error(f"Error detecting local IPs: {str(e)}")
+
+    def configure_interfaces(self):
+        """Configure network interfaces"""
+        print(f"\n{Fore.CYAN}=== Network Interface Configuration ==={Style.RESET_ALL}")
+        
+        # Refresh available interfaces
+        self.available_interfaces = self.get_available_interfaces()
+        
+        if not self.available_interfaces:
+            print(f"{Fore.RED}Error: No network interfaces detected!{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Please check your network connections and try again.{Style.RESET_ALL}")
+            print("\nPossible solutions:")
+            print("1. Make sure your network hardware is properly connected")
+            print("2. Run 'ip link' or 'ifconfig' to check interface status")
+            print("3. Use 'ip link set <interface> up' to bring up interfaces")
+            input("\nPress Enter to return to main menu...")
+            return
+        
+        # Display available interfaces and select one
+        self.select_interface()
 
 def main():
     if os.geteuid() != 0:
