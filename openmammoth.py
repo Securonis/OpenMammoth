@@ -300,30 +300,26 @@ class OpenMammoth:
                 logging.warning(f"Possible IP spoofing detected from {ip_src}")
                 return True
                 
-            # Gelişmiş koruma etkinse ek kontroller yap
+
             if self.advanced_protection:
-                # TTL analizi
+
                 if self.check_ttl_anomalies(packet):
                     logging.warning(f"TTL anomaly detected from {ip_src}")
                     return True
-                
-                # TCP sequence prediction kontrolü
+
                 if TCP in packet and self.check_tcp_sequence_prediction(packet):
                     logging.warning(f"TCP sequence prediction attack detected from {ip_src}")
                     return True
-                
-                # Null scan kontrolü
+   
                 if TCP in packet and packet[TCP].flags == 0:
                     logging.warning(f"Null scan detected from {ip_src}")
                     return True
                 
-                # FIN scan kontrolü
                 if TCP in packet and packet[TCP].flags == 0x01:
                     logging.warning(f"FIN scan detected from {ip_src}")
                     return True
                 
-                # XMAS scan kontrolü
-                if TCP in packet and packet[TCP].flags == 0x29:  # FIN, PSH, URG bayrakları
+                if TCP in packet and packet[TCP].flags == 0x29: 
                     logging.warning(f"XMAS scan detected from {ip_src}")
                     return True
                 
@@ -366,13 +362,13 @@ class OpenMammoth:
 
     def check_dns_amplification(self, packet):
         if UDP in packet and packet[UDP].dport == 53:
-            if len(packet) > 1000:  # Large DNS response
+            if len(packet) > 1000: 
                 return True
         return False
 
     def check_fragment_attack(self, packet):
-        if IP in packet and packet[IP].flags & 0x1:  # More fragments
-            if packet[IP].frag > 0:  # Non-zero fragment offset
+        if IP in packet and packet[IP].flags & 0x1:  
+            if packet[IP].frag > 0:  
                 return True
         return False
 
@@ -408,16 +404,14 @@ class OpenMammoth:
         """TTL değerindeki anomalileri kontrol et"""
         if IP in packet:
             ttl = packet[IP].ttl
-            # Normal TTL değerleri genellikle 32, 64, 128, 255 civarında olur
-            # Çok düşük veya anormal TTL değerleri şüphelidir
             if ttl < 5 or ttl > 250:
                 return True
         return False
 
     def check_tcp_sequence_prediction(self, packet):
-        """TCP sequence tahmin saldırılarını kontrol et"""
+        """TCP sequence"""
         if TCP in packet:
-            # Basit bir kontrol - gerçek bir uygulamada daha karmaşık olabilir
+
             seq = packet[TCP].seq
             if seq == 0 or seq == 1:
                 return True
@@ -1164,7 +1158,7 @@ class OpenMammoth:
                 print(f"{Fore.RED}Please enter a valid number!{Style.RESET_ALL}")
 
     def load_threat_intel(self):
-        """Tehdit istihbaratı veritabanını yükle"""
+        """database"""
         try:
             intel_path = os.path.join(self.config_dir, 'threat_intel.json')
             if os.path.exists(intel_path):
@@ -1172,7 +1166,6 @@ class OpenMammoth:
                     self.threat_intel_db = json.load(f)
                     logging.info(f"Loaded {len(self.threat_intel_db)} threat intelligence entries")
             else:
-                # İlk kez çalıştırılıyorsa, boş bir veritabanı oluştur
                 self.update_threat_intel()
         except Exception as e:
             logging.error(f"Error loading threat intelligence: {str(e)}")
