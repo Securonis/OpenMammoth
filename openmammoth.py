@@ -81,10 +81,14 @@ class OpenMammoth:
         self.load_threat_intel()
         self.load_ip_lists()
         
-        # Just show a warning if no interfaces found, don't block further execution
+        # Show warning if no interfaces found and wait for user to press Enter
         if not self.available_interfaces:
-            print(f"{Fore.RED}Warning: No network interfaces found!{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}You can reconfigure interfaces from the main menu.{Style.RESET_ALL}")
+            os.system('clear')
+            print(self.get_ascii_art())
+            print(f"\n{Fore.RED}Warning: No network interfaces found!{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}You can configure network interfaces from the main menu.{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Option 7: Configure Network Interfaces{Style.RESET_ALL}")
+            input("\nPress Enter to continue to main menu...")
 
     def get_ascii_art(self):
         return f"""{Fore.RED}
@@ -300,26 +304,30 @@ class OpenMammoth:
                 logging.warning(f"Possible IP spoofing detected from {ip_src}")
                 return True
                 
-
+            # Gelişmiş koruma etkinse ek kontroller yap
             if self.advanced_protection:
-
+                # TTL analizi
                 if self.check_ttl_anomalies(packet):
                     logging.warning(f"TTL anomaly detected from {ip_src}")
                     return True
-
+                
+                # TCP sequence prediction kontrolü
                 if TCP in packet and self.check_tcp_sequence_prediction(packet):
                     logging.warning(f"TCP sequence prediction attack detected from {ip_src}")
                     return True
-   
+                
+                # Null scan kontrolü
                 if TCP in packet and packet[TCP].flags == 0:
                     logging.warning(f"Null scan detected from {ip_src}")
                     return True
                 
+                # FIN scan kontrolü
                 if TCP in packet and packet[TCP].flags == 0x01:
                     logging.warning(f"FIN scan detected from {ip_src}")
                     return True
                 
-                if TCP in packet and packet[TCP].flags == 0x29: 
+                # XMAS scan kontrolü
+                if TCP in packet and packet[TCP].flags == 0x29:  # FIN, PSH, URG bayrakları
                     logging.warning(f"XMAS scan detected from {ip_src}")
                     return True
                 
@@ -362,13 +370,13 @@ class OpenMammoth:
 
     def check_dns_amplification(self, packet):
         if UDP in packet and packet[UDP].dport == 53:
-            if len(packet) > 1000: 
+            if len(packet) > 1000:  # Large DNS response
                 return True
         return False
 
     def check_fragment_attack(self, packet):
-        if IP in packet and packet[IP].flags & 0x1:  
-            if packet[IP].frag > 0:  
+        if IP in packet and packet[IP].flags & 0x1:  # More fragments
+            if packet[IP].frag > 0:  # Non-zero fragment offset
                 return True
         return False
 
@@ -404,14 +412,16 @@ class OpenMammoth:
         """TTL değerindeki anomalileri kontrol et"""
         if IP in packet:
             ttl = packet[IP].ttl
+            # Normal TTL değerleri genellikle 32, 64, 128, 255 civarında olur
+            # Çok düşük veya anormal TTL değerleri şüphelidir
             if ttl < 5 or ttl > 250:
                 return True
         return False
 
     def check_tcp_sequence_prediction(self, packet):
-        """TCP sequence"""
+        """TCP sequence tahmin saldırılarını kontrol et"""
         if TCP in packet:
-
+            # Basit bir kontrol - gerçek bir uygulamada daha karmaşık olabilir
             seq = packet[TCP].seq
             if seq == 0 or seq == 1:
                 return True
@@ -457,8 +467,9 @@ class OpenMammoth:
     def start_protection(self):
         if not self.interface:
             print(f"{Fore.RED}Error: No network interface selected!{Style.RESET_ALL}")
-            if not self.select_interface():
-                return False
+            print(f"{Fore.YELLOW}Please select a network interface first (Option 7).{Style.RESET_ALL}")
+            input("\nPress Enter to return to main menu...")
+            return False
 
         if not self.is_running:
             try:
@@ -471,6 +482,7 @@ class OpenMammoth:
                 if not any(iface['name'] == self.interface and iface['status'] == 'UP' 
                           for iface in self.available_interfaces):
                     print(f"{Fore.RED}Error: Selected interface is not available!{Style.RESET_ALL}")
+                    input("\nPress Enter to return to main menu...")
                     return False
                 
                 # Wait for commands to complete
@@ -1158,7 +1170,7 @@ class OpenMammoth:
                 print(f"{Fore.RED}Please enter a valid number!{Style.RESET_ALL}")
 
     def load_threat_intel(self):
-        """database"""
+        """Tehdit istihbaratı veritabanını yükle"""
         try:
             intel_path = os.path.join(self.config_dir, 'threat_intel.json')
             if os.path.exists(intel_path):
@@ -1166,6 +1178,7 @@ class OpenMammoth:
                     self.threat_intel_db = json.load(f)
                     logging.info(f"Loaded {len(self.threat_intel_db)} threat intelligence entries")
             else:
+                # İlk kez çalıştırılıyorsa, boş bir veritabanı oluştur
                 self.update_threat_intel()
         except Exception as e:
             logging.error(f"Error loading threat intelligence: {str(e)}")
