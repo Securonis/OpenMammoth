@@ -198,6 +198,7 @@ class OpenMammoth:
                 if self.check_ip_reputation(ip_src):
                     self.block_ip(ip_src, reason="Reputation based block")
                     self.stats['blocked_packets'] += 1
+                    print(f"{Fore.RED}[!] Blocked malicious IP: {ip_src} (Reputation){Style.RESET_ALL}")
                     logging.warning(f"IP blocked due to reputation: {ip_src}")
                     self.stats['total_packets'] += 1
                     return
@@ -213,9 +214,18 @@ class OpenMammoth:
                     self.block_ip(ip_src, reason="Attack detected")
                     self.stats['blocked_packets'] += 1
                     self.stats['attacks_detected'] += 1
+                    print(f"{Fore.RED}[!] Attack detected and blocked from: {ip_src}{Style.RESET_ALL}")
                     logging.warning(f"Attack detected from {ip_src}")
                 
                 self.stats['total_packets'] += 1
+                
+                # Log periodic statistics
+                if self.stats['total_packets'] % 1000 == 0:  # Her 1000 pakette bir log
+                    print(f"\n{Fore.CYAN}[*] Protection Statistics:{Style.RESET_ALL}")
+                    print(f"Total Packets: {self.stats['total_packets']}")
+                    print(f"Blocked Packets: {self.stats['blocked_packets']}")
+                    print(f"Attacks Detected: {self.stats['attacks_detected']}\n")
+                    
         except Exception as e:
             logging.error(f"Error in packet handler: {str(e)}")
 
@@ -246,127 +256,97 @@ class OpenMammoth:
                 self.packet_rates[ip]['count'] += 1
 
     def detect_attacks(self, packet):
+        """Detect various types of attacks"""
         if IP in packet:
             ip_src = packet[IP].src
             
-            # Check for packet rate attacks
-            if self.check_packet_rate(ip_src):
-                return True
-                
-            # Check for SYN flood
-            if TCP in packet and packet[TCP].flags == 0x02:
-                if self.check_syn_flood(ip_src):
+            # Skip local network traffic completely
+            if self.is_local_network(ip_src) or ip_src in self.local_ips:
+                return False
+            
+            # Skip whitelisted IPs
+            if self.is_ip_in_whitelist(ip_src):
+                return False
+            
+            # Skip router and gateway IPs
+            if ip_src.endswith('.1') or ip_src.endswith('.254'):
+                return False
+            
+            attack_detected = False
+            attack_type = None
+            
+            # Adjust thresholds based on protection level
+            threshold_multiplier = self.protection_level * 0.5  # Less aggressive multiplier
+            
+            # TCP based attacks
+            if TCP in packet:
+                # Check for SYN flood with adjusted threshold
+                if packet[TCP].flags == 0x02 and self.check_syn_flood(ip_src, threshold_multiplier):
                     self.stats['syn_floods'] += 1
-                    logging.warning(f"SYN flood detected from {ip_src}")
-                    return True
-                    
-            # Check for UDP flood
-            if UDP in packet:
-                if self.check_udp_flood(ip_src):
-                    self.stats['udp_floods'] += 1
-                    logging.warning(f"UDP flood detected from {ip_src}")
-                    return True
-                    
-            # Check for ICMP flood
-            if ICMP in packet:
-                if self.check_icmp_flood(ip_src):
-                    self.stats['icmp_floods'] += 1
-                    logging.warning(f"ICMP flood detected from {ip_src}")
-                    return True
-                    
-            # Check for port scan
-            if self.check_port_scan(ip_src):
-                self.stats['port_scans'] += 1
-                logging.warning(f"Port scan detected from {ip_src}")
+                    attack_detected = True
+                    attack_type = "SYN Flood"
+                
+                # Check for port scan with adjusted threshold
+                elif self.check_port_scan(ip_src, threshold_multiplier):
+                    self.stats['port_scans'] += 1
+                    attack_detected = True
+                    attack_type = "Port Scan"
+            
+            # Check for UDP flood with adjusted threshold
+            elif UDP in packet and self.check_udp_flood(ip_src, threshold_multiplier):
+                self.stats['udp_floods'] += 1
+                attack_detected = True
+                attack_type = "UDP Flood"
+            
+            # Check for ICMP flood with adjusted threshold
+            elif ICMP in packet and self.check_icmp_flood(ip_src, threshold_multiplier):
+                self.stats['icmp_floods'] += 1
+                attack_detected = True
+                attack_type = "ICMP Flood"
+            
+            if attack_detected:
+                logging.warning(f"{attack_type} detected from {ip_src}")
+                print(f"{Fore.RED}[!] {attack_type} detected from: {ip_src}{Style.RESET_ALL}")
                 return True
-                
-            # Check for DNS amplification
-            if self.check_dns_amplification(packet):
-                self.stats['dns_amplification'] += 1
-                logging.warning(f"DNS amplification detected from {ip_src}")
-                return True
-                
-            # Check for fragment attacks
-            if self.check_fragment_attack(packet):
-                self.stats['fragment_attacks'] += 1
-                logging.warning(f"Fragment attack detected from {ip_src}")
-                return True
-                
-            # Check for malformed packets
-            if self.check_malformed_packet(packet):
-                self.stats['malformed_packets'] += 1
-                logging.warning(f"Malformed packet detected from {ip_src}")
-                return True
-                
-            # Check for IP spoofing
-            if self.check_ip_spoofing(packet):
-                self.stats['spoofed_ips'] += 1
-                logging.warning(f"Possible IP spoofing detected from {ip_src}")
-                return True
-                
-            # Gelişmiş koruma etkinse ek kontroller yap
-            if self.advanced_protection:
-                # TTL analizi
-                if self.check_ttl_anomalies(packet):
-                    logging.warning(f"TTL anomaly detected from {ip_src}")
-                    return True
-                
-                # TCP sequence prediction kontrolü
-                if TCP in packet and self.check_tcp_sequence_prediction(packet):
-                    logging.warning(f"TCP sequence prediction attack detected from {ip_src}")
-                    return True
-                
-                # Null scan kontrolü
-                if TCP in packet and packet[TCP].flags == 0:
-                    logging.warning(f"Null scan detected from {ip_src}")
-                    return True
-                
-                # FIN scan kontrolü
-                if TCP in packet and packet[TCP].flags == 0x01:
-                    logging.warning(f"FIN scan detected from {ip_src}")
-                    return True
-                
-                # XMAS scan kontrolü
-                if TCP in packet and packet[TCP].flags == 0x29:  # FIN, PSH, URG bayrakları
-                    logging.warning(f"XMAS scan detected from {ip_src}")
-                    return True
-                
+            
         return False
 
-    def check_packet_rate(self, ip):
-        if ip in self.packet_rates:
-            rate = self.packet_rates[ip]['count']
-            threshold = 1000 * self.protection_level
-            return rate > threshold
-        return False
-
-    def check_syn_flood(self, ip):
+    def check_syn_flood(self, ip, threshold_multiplier=1.0):
+        """Check for SYN flood with adjustable threshold"""
         syn_count = sum(1 for conn in self.connection_tracker.values() 
                        if conn['count'] > 0 and time.time() - conn['timestamp'] < 1)
-        threshold = 100 * self.protection_level
-        return syn_count > threshold
+        base_threshold = 500  # Increased base threshold
+        return syn_count > (base_threshold * threshold_multiplier)
 
-    def check_udp_flood(self, ip):
+    def check_udp_flood(self, ip, threshold_multiplier=1.0):
+        """Check for UDP flood with adjustable threshold"""
         if ip in self.packet_rates:
             rate = self.packet_rates[ip]['count']
-            threshold = 500 * self.protection_level
-            return rate > threshold
+            base_threshold = 2000  # Increased base threshold
+            return rate > (base_threshold * threshold_multiplier)
         return False
 
-    def check_icmp_flood(self, ip):
+    def check_icmp_flood(self, ip, threshold_multiplier=1.0):
+        """Check for ICMP flood with adjustable threshold"""
         if ip in self.packet_rates:
             rate = self.packet_rates[ip]['count']
-            threshold = 200 * self.protection_level
-            return rate > threshold
+            base_threshold = 200  # Increased base threshold
+            return rate > (base_threshold * threshold_multiplier)
         return False
 
-    def check_port_scan(self, ip):
+    def check_port_scan(self, ip, threshold_multiplier=1.0):
+        """Check for port scan with adjustable threshold"""
         unique_ports = set()
+        current_time = time.time()
+        scan_window = 60  # 60-second window
+        
         for conn in self.connection_tracker:
-            if ip in conn:
-                unique_ports.add(conn.split('-')[1])
-        threshold = 50 * self.protection_level
-        return len(unique_ports) > threshold
+            if ip in conn and current_time - self.connection_tracker[conn]['timestamp'] < scan_window:
+                port = conn.split('-')[1].split(':')[-1]
+                unique_ports.add(port)
+        
+        base_threshold = 50  # Increased base threshold
+        return len(unique_ports) > (base_threshold * threshold_multiplier)
 
     def check_dns_amplification(self, packet):
         if UDP in packet and packet[UDP].dport == 53:
@@ -473,31 +453,67 @@ class OpenMammoth:
 
         if not self.is_running:
             try:
+                # Check if interface exists and is up
+                interfaces = self.get_available_interfaces()
+                interface_exists = False
+                for iface in interfaces:
+                    if iface['name'] == self.interface:
+                        interface_exists = True
+                        if iface['status'] != 'UP':
+                            print(f"{Fore.RED}Error: Interface {self.interface} is DOWN!{Style.RESET_ALL}")
+                            return False
+                        break
+                
+                if not interface_exists:
+                    print(f"{Fore.RED}Error: Interface {self.interface} not found!{Style.RESET_ALL}")
+                    return False
+
                 # If auto updates are enabled and it's time to check for updates
                 if self.auto_update and time.time() - self.last_update_check > self.update_interval:
                     print(f"{Fore.YELLOW}Checking for updates...{Style.RESET_ALL}")
                     self.check_for_updates()
-                
-                # check for interface
-                if not any(iface['name'] == self.interface and iface['status'] == 'UP' 
-                          for iface in self.available_interfaces):
-                    print(f"{Fore.RED}Error: Selected interface is not available!{Style.RESET_ALL}")
-                    input("\nPress Enter to return to main menu...")
-                    return False
-                
-                # Wait for commands to complete
-                time.sleep(1)
 
                 self.is_running = True
                 # Save start time
                 self.start_time = time.time()
-                print(f"{Fore.GREEN}Starting protection on interface {self.interface}...{Style.RESET_ALL}")
+                
+                # Clear screen and show startup banner
+                os.system('clear')
+                print(self.get_ascii_art())
+                print(f"\n{Fore.GREEN}[+] Starting OpenMammoth Protection System{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}[*] Interface: {self.interface}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}[*] Protection Level: {self.protection_level}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}[*] Advanced Protection: {'Enabled' if self.advanced_protection else 'Disabled'}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}[*] Threat Intelligence: {'Enabled' if self.use_threat_intel else 'Disabled'}{Style.RESET_ALL}")
+                print(f"\n{Fore.YELLOW}[*] Initializing protection modules...{Style.RESET_ALL}")
                 
                 def packet_capture():
                     try:
-                        sniff(iface=self.interface, prn=self.packet_handler, store=0, stop_filter=lambda p: not self.is_running)
+                        print(f"{Fore.GREEN}[+] Starting packet capture on {self.interface}...{Style.RESET_ALL}")
+                        # Set Scapy logging level to reduce noise
+                        logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+                        
+                        # Try to create L3 socket with appropriate privileges
+                        conf.L3socket = L3RawSocket
+                        
+                        print(f"{Fore.GREEN}[+] Packet capture initialized successfully{Style.RESET_ALL}")
+                        print(f"{Fore.GREEN}[+] Protection system is now active{Style.RESET_ALL}")
+                        print(f"\n{Fore.CYAN}[*] Monitoring network traffic...{Style.RESET_ALL}")
+                        
+                        # Start sniffing with store=0 to avoid memory issues
+                        sniff(iface=self.interface, 
+                              prn=self.packet_handler, 
+                              store=0,
+                              filter="ip",  # Only capture IP packets
+                              stop_filter=lambda p: not self.is_running)
+                              
+                    except PermissionError:
+                        logging.error("Permission denied when starting packet capture. Make sure you're running as root.")
+                        print(f"{Fore.RED}Error: Permission denied. Make sure you're running as root.{Style.RESET_ALL}")
+                        self.is_running = False
                     except Exception as e:
                         logging.error(f"Error in packet capture: {str(e)}")
+                        print(f"{Fore.RED}Error in packet capture: {str(e)}{Style.RESET_ALL}")
                         self.is_running = False
                 
                 def data_cleanup():
@@ -518,22 +534,34 @@ class OpenMammoth:
                         except Exception as e:
                             logging.error(f"Error in auto updater: {str(e)}")
                 
+                # Start packet capture thread
                 self.capture_thread = threading.Thread(target=packet_capture)
                 self.capture_thread.daemon = True
                 self.capture_thread.start()
                 
+                # Start cleanup thread
                 self.cleanup_thread = threading.Thread(target=data_cleanup)
                 self.cleanup_thread.daemon = True
                 self.cleanup_thread.start()
                 
+                # Start update thread
                 self.update_thread = threading.Thread(target=auto_updater)
                 self.update_thread.daemon = True
                 self.update_thread.start()
                 
+                # Wait a moment to see if packet capture starts successfully
+                time.sleep(2)
+                if not self.is_running:
+                    print(f"{Fore.RED}Failed to start protection. Check the logs for details.{Style.RESET_ALL}")
+                    return False
+                
+                print(f"{Fore.GREEN}Protection started successfully on {self.interface}{Style.RESET_ALL}")
                 logging.info(f"Protection started on interface {self.interface}")
                 return True
+                
             except Exception as e:
                 print(f"{Fore.RED}Error starting protection: {str(e)}{Style.RESET_ALL}")
+                logging.error(f"Error starting protection: {str(e)}")
                 self.is_running = False
                 return False
         return False
@@ -633,34 +661,40 @@ class OpenMammoth:
             print(f"\n{Fore.CYAN}=== OpenMammoth Network Protection ==={Style.RESET_ALL}")
             print(f"{Fore.GREEN}1. Start Protection{Style.RESET_ALL}")
             print(f"{Fore.RED}2. Stop Protection{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}3. Settings{Style.RESET_ALL}")
-            print(f"{Fore.BLUE}4. View Statistics{Style.RESET_ALL}")
-            print(f"{Fore.MAGENTA}5. View Blocked IPs{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}6. Advanced Options{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}7. Configure Network Interfaces{Style.RESET_ALL}")
-            print(f"{Fore.WHITE}8. Help{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}9. About{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}3. Protection Status{Style.RESET_ALL}")
+            print(f"{Fore.BLUE}4. Settings{Style.RESET_ALL}")
+            print(f"{Fore.MAGENTA}5. View Statistics{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}6. View Blocked IPs{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}7. Advanced Options{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}8. Configure Network Interfaces{Style.RESET_ALL}")
+            print(f"{Fore.WHITE}9. Reset IPTables{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}10. Help{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}11. About{Style.RESET_ALL}")
             print(f"{Fore.RED}0. Exit{Style.RESET_ALL}")
             
-            choice = input("\nEnter your choice (0-9): ")
+            choice = input("\nEnter your choice (0-11): ")
             
             if choice == "1":
                 self.start_protection()
             elif choice == "2":
                 self.stop_protection()
             elif choice == "3":
-                self.settings_menu()
+                self.view_protection_status()
             elif choice == "4":
-                self.view_statistics()
+                self.settings_menu()
             elif choice == "5":
-                self.view_blocked_ips()
+                self.view_statistics()
             elif choice == "6":
-                self.advanced_options()
+                self.view_blocked_ips()
             elif choice == "7":
-                self.configure_interfaces()
+                self.advanced_options()
             elif choice == "8":
-                self.show_help()
+                self.configure_interfaces()
             elif choice == "9":
+                self.reset_iptables_rules()
+            elif choice == "10":
+                self.show_help()
+            elif choice == "11":
                 self.show_about()
             elif choice == "0":
                 if self.is_running:
@@ -760,16 +794,32 @@ class OpenMammoth:
             print(f"{Fore.RED}Error displaying statistics: {str(e)}{Style.RESET_ALL}")
 
     def view_blocked_ips(self):
+        """View blocked IP addresses"""
+        os.system('clear')  # Clear screen first
         print(f"\n{Fore.CYAN}=== Blocked IP Addresses ==={Style.RESET_ALL}")
+        
         if not self.blocked_ips:
-            print("No IPs are currently blocked.")
+            print(f"\n{Fore.YELLOW}No IPs are currently blocked.{Style.RESET_ALL}")
         else:
+            print(f"\nTotal Blocked IPs: {len(self.blocked_ips)}\n")
+            print(f"{Fore.CYAN}{'IP Address':<20} {'Duration':<15} {'Reason':<30}{Style.RESET_ALL}")
+            print("-" * 65)
+            
+            current_time = time.time()
             for ip, info in self.blocked_ips.items():
-                duration = time.time() - info['timestamp']
-                print(f"IP: {ip}")
-                print(f"Blocked for: {duration:.2f} seconds")
-                print(f"Reason: {info['reason']}")
-                print("-" * 40)
+                duration = current_time - info['timestamp']
+                # Convert duration to human readable format
+                if duration < 60:
+                    duration_str = f"{int(duration)}s"
+                elif duration < 3600:
+                    duration_str = f"{int(duration/60)}m"
+                else:
+                    duration_str = f"{int(duration/3600)}h"
+                
+                print(f"{ip:<20} {duration_str:<15} {info['reason']:<30}")
+        
+        print("\nPress Enter to return to main menu...")
+        input()
 
     def advanced_options(self):
         while True:
@@ -806,153 +856,67 @@ class OpenMammoth:
                 print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
 
     def view_logs(self):
+        """View detailed logs"""
+        os.system('clear')
         try:
             log_path = os.path.join(self.config_dir, 'openmammoth.log')
-            with open(log_path, 'r') as f:
+            if os.path.exists(log_path):
                 print(f"\n{Fore.CYAN}=== Recent Logs ==={Style.RESET_ALL}")
-                for line in f.readlines()[-20:]:  # Show last 20 lines
-                    print(line.strip())
-        except FileNotFoundError:
-            print(f"{Fore.RED}No log file found.{Style.RESET_ALL}")
+                with open(log_path, 'r') as f:
+                    logs = f.readlines()
+                    # Show last 20 lines with proper formatting
+                    for line in logs[-20:]:
+                        # Color code different log levels
+                        if "ERROR" in line:
+                            print(f"{Fore.RED}{line.strip()}{Style.RESET_ALL}")
+                        elif "WARNING" in line:
+                            print(f"{Fore.YELLOW}{line.strip()}{Style.RESET_ALL}")
+                        else:
+                            print(line.strip())
+            else:
+                print(f"{Fore.RED}No log file found.{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}Error reading log file: {str(e)}{Style.RESET_ALL}")
+        
+        input("\nPress Enter to return to Advanced Options...")
 
     def export_statistics(self):
-        filename = f"stats_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(filename, 'w') as f:
-            json.dump(self.stats, f, indent=4)
-        print(f"\n{Fore.GREEN}Statistics exported to {filename}{Style.RESET_ALL}")
-
-    def clear_blocked_ips(self):
-        """Clear blocked IPs"""
-        ips_to_unblock = [ip for ip in self.blocked_ips if ip not in self.blacklist]
-        if not ips_to_unblock:
-            print(f"{Fore.YELLOW}No temporary blocked IPs to clear.{Style.RESET_ALL}")
-            return
-            
+        """Export statistics to a file"""
         try:
-            for ip in ips_to_unblock:
-                try:
-                    subprocess.run(
-                        ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP'],
-                        capture_output=True, text=True, check=True
-                    )
-                    del self.blocked_ips[ip]
-                except Exception as e:
-                    logging.error(f"Error removing iptables rule for {ip}: {str(e)}")
+            os.system('clear')
+            print(f"\n{Fore.CYAN}=== Export Statistics ==={Style.RESET_ALL}")
             
-            print(f"\n{Fore.GREEN}All temporary blocked IPs have been cleared.{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Note: Blacklisted IPs remain blocked.{Style.RESET_ALL}")
+            # Create export data
+            export_data = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "stats": self.stats,
+                "configuration": {
+                    "protection_level": self.protection_level,
+                    "advanced_protection": self.advanced_protection,
+                    "interface": self.interface,
+                    "threat_intel_enabled": self.use_threat_intel
+                },
+                "blocked_ips": len(self.blocked_ips),
+                "whitelisted_ips": len(self.whitelist),
+                "blacklisted_ips": len(self.blacklist)
+            }
+            
+            # Create filename with timestamp
+            filename = f"openmammoth_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            with open(filename, 'w') as f:
+                json.dump(export_data, f, indent=4)
+            
+            print(f"\n{Fore.GREEN}[+] Statistics exported successfully to: {filename}{Style.RESET_ALL}")
         except Exception as e:
-            logging.error(f"Error clearing blocked IPs: {str(e)}")
-            print(f"{Fore.RED}Error clearing blocked IPs: {str(e)}{Style.RESET_ALL}")
-
-    def manage_whitelist(self):
-        """Manage whitelist"""
-        while True:
-            print(f"\n{Fore.CYAN}=== Whitelist Management ==={Style.RESET_ALL}")
-            print("1. View Whitelist")
-            print("2. Add IP to Whitelist")
-            print("3. Remove IP from Whitelist")
-            print("4. Back to Advanced Options")
-            
-            choice = input("\nEnter your choice (1-4): ")
-            
-            if choice == "1":
-                self.view_whitelist()
-            elif choice == "2":
-                ip = input("Enter IP address to whitelist: ")
-                if self.add_to_whitelist(ip):
-                    print(f"{Fore.GREEN}IP {ip} added to whitelist.{Style.RESET_ALL}")
-                else:
-                    print(f"{Fore.RED}Failed to add IP to whitelist.{Style.RESET_ALL}")
-            elif choice == "3":
-                self.view_whitelist()
-                if self.whitelist:
-                    ip_idx = input("Enter index of IP to remove (or 'q' to cancel): ")
-                    if ip_idx.lower() != 'q':
-                        try:
-                            idx = int(ip_idx) - 1
-                            if 0 <= idx < len(self.whitelist):
-                                ip = self.whitelist.pop(idx)
-                                self.save_ip_lists()
-                                print(f"{Fore.GREEN}IP {ip} removed from whitelist.{Style.RESET_ALL}")
-                            else:
-                                print(f"{Fore.RED}Invalid index.{Style.RESET_ALL}")
-                        except ValueError:
-                            print(f"{Fore.RED}Please enter a valid number.{Style.RESET_ALL}")
-            elif choice == "4":
-                break
-            else:
-                print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
-
-    def view_whitelist(self):
-        """View whitelisted IP addresses"""
-        print(f"\n{Fore.CYAN}=== Whitelisted IP Addresses ==={Style.RESET_ALL}")
-        if not self.whitelist:
-            print("No IPs are whitelisted.")
-        else:
-            for idx, ip in enumerate(self.whitelist, 1):
-                print(f"{idx}. {ip}")
-
-    def manage_blacklist(self):
-        """Manage blacklist"""
-        while True:
-            print(f"\n{Fore.CYAN}=== Blacklist Management ==={Style.RESET_ALL}")
-            print("1. View Blacklist")
-            print("2. Add IP to Blacklist")
-            print("3. Remove IP from Blacklist")
-            print("4. Back to Advanced Options")
-            
-            choice = input("\nEnter your choice (1-4): ")
-            
-            if choice == "1":
-                self.view_blacklist()
-            elif choice == "2":
-                ip = input("Enter IP address to blacklist: ")
-                if self.add_to_blacklist(ip):
-                    print(f"{Fore.GREEN}IP {ip} added to blacklist.{Style.RESET_ALL}")
-                else:
-                    print(f"{Fore.RED}Failed to add IP to blacklist.{Style.RESET_ALL}")
-            elif choice == "3":
-                self.view_blacklist()
-                if self.blacklist:
-                    ip_idx = input("Enter index of IP to remove (or 'q' to cancel): ")
-                    if ip_idx.lower() != 'q':
-                        try:
-                            idx = int(ip_idx) - 1
-                            if 0 <= idx < len(self.blacklist):
-                                ip = self.blacklist.pop(idx)
-                                if ip in self.blocked_ips:
-                                    try:
-                                        subprocess.run(
-                                            ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP'],
-                                            capture_output=True, text=True, check=True
-                                        )
-                                        del self.blocked_ips[ip]
-                                    except Exception as e:
-                                        logging.error(f"Error removing rule for {ip}: {str(e)}")
-                                self.save_ip_lists()
-                                print(f"{Fore.GREEN}IP {ip} removed from blacklist.{Style.RESET_ALL}")
-                            else:
-                                print(f"{Fore.RED}Invalid index.{Style.RESET_ALL}")
-                        except ValueError:
-                            print(f"{Fore.RED}Please enter a valid number.{Style.RESET_ALL}")
-            elif choice == "4":
-                break
-            else:
-                print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
-
-    def view_blacklist(self):
-        """View blacklisted IP addresses"""
-        print(f"\n{Fore.CYAN}=== Blacklisted IP Addresses ==={Style.RESET_ALL}")
-        if not self.blacklist:
-            print("No IPs are blacklisted.")
-        else:
-            for idx, ip in enumerate(self.blacklist, 1):
-                print(f"{idx}. {ip}")
+            print(f"{Fore.RED}Error exporting statistics: {str(e)}{Style.RESET_ALL}")
+        
+        input("\nPress Enter to return to Advanced Options...")
 
     def firewall_settings(self):
         """Manage firewall settings"""
         while True:
+            os.system('clear')
             print(f"\n{Fore.CYAN}=== Firewall Settings ==={Style.RESET_ALL}")
             print("1. View Current Firewall Rules")
             print("2. Reset All Firewall Rules")
@@ -964,52 +928,80 @@ class OpenMammoth:
             if choice == "1":
                 self.view_firewall_rules()
             elif choice == "2":
-                confirmed = input(f"{Fore.RED}Warning: This will reset all iptables rules. Continue? (y/n): {Style.RESET_ALL}")
-                if confirmed.lower() == 'y':
-                    self.reset_firewall_rules()
-                    print(f"{Fore.GREEN}Firewall rules reset.{Style.RESET_ALL}")
+                self.reset_iptables_rules()
             elif choice == "3":
                 self.apply_basic_protection()
                 print(f"{Fore.GREEN}Basic protection rules applied.{Style.RESET_ALL}")
+                input("\nPress Enter to continue...")
             elif choice == "4":
                 break
             else:
                 print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
+                input("\nPress Enter to continue...")
 
     def view_firewall_rules(self):
         """View current firewall rules"""
+        os.system('clear')
         try:
-            result = subprocess.run(['iptables', '-L', '-n'], capture_output=True, text=True)
-            print(f"\n{Fore.CYAN}=== Current Firewall Rules ==={Style.RESET_ALL}")
-            print(result.stdout)
+            print(f"\n{Fore.CYAN}=== Current Firewall Rules ==={Style.RESET_ALL}\n")
+            result = subprocess.run(['iptables', '-L', '-n', '--line-numbers'], capture_output=True, text=True)
+            
+            # Format and colorize the output
+            for line in result.stdout.split('\n'):
+                if "Chain" in line:
+                    print(f"{Fore.YELLOW}{line}{Style.RESET_ALL}")
+                elif "target" in line:
+                    print(f"{Fore.CYAN}{line}{Style.RESET_ALL}")
+                elif "DROP" in line:
+                    print(f"{Fore.RED}{line}{Style.RESET_ALL}")
+                elif "ACCEPT" in line:
+                    print(f"{Fore.GREEN}{line}{Style.RESET_ALL}")
+                else:
+                    print(line)
         except Exception as e:
             print(f"{Fore.RED}Error viewing firewall rules: {str(e)}{Style.RESET_ALL}")
+        
+        input("\nPress Enter to return to Firewall Settings...")
 
-    def reset_firewall_rules(self):
-        """Reset all firewall rules"""
+    def reset_iptables_rules(self):
+        """Reset all IPTables rules and restore default policy"""
         try:
-            subprocess.run(['iptables', '-F'], check=True)
-            subprocess.run(['iptables', '-X'], check=True)
-            subprocess.run(['iptables', '-t', 'nat', '-F'], check=True)
-            subprocess.run(['iptables', '-t', 'nat', '-X'], check=True)
-            subprocess.run(['iptables', '-t', 'mangle', '-F'], check=True)
-            subprocess.run(['iptables', '-t', 'mangle', '-X'], check=True)
-            subprocess.run(['iptables', '-P', 'INPUT', 'ACCEPT'], check=True)
-            subprocess.run(['iptables', '-P', 'FORWARD', 'ACCEPT'], check=True)
-            subprocess.run(['iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
+            print(f"\n{Fore.YELLOW}Warning: This will reset all IPTables rules.{Style.RESET_ALL}")
+            confirm = input("Are you sure you want to continue? (y/n): ")
             
-            # Update blocked_ips after rules are cleared
-            self.blocked_ips.clear()
-            
-            logging.info("Firewall rules reset")
+            if confirm.lower() == 'y':
+                # Flush all rules
+                subprocess.run(['iptables', '-F'], check=True)
+                subprocess.run(['iptables', '-X'], check=True)
+                subprocess.run(['iptables', '-t', 'nat', '-F'], check=True)
+                subprocess.run(['iptables', '-t', 'nat', '-X'], check=True)
+                subprocess.run(['iptables', '-t', 'mangle', '-F'], check=True)
+                subprocess.run(['iptables', '-t', 'mangle', '-X'], check=True)
+                
+                # Set default policies to ACCEPT
+                subprocess.run(['iptables', '-P', 'INPUT', 'ACCEPT'], check=True)
+                subprocess.run(['iptables', '-P', 'FORWARD', 'ACCEPT'], check=True)
+                subprocess.run(['iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
+                
+                # Clear blocked IPs list
+                self.blocked_ips.clear()
+                
+                print(f"{Fore.GREEN}Successfully reset all IPTables rules.{Style.RESET_ALL}")
+                logging.info("IPTables rules reset by user")
+            else:
+                print(f"{Fore.YELLOW}Operation cancelled.{Style.RESET_ALL}")
+                
         except Exception as e:
-            logging.error(f"Error resetting firewall rules: {str(e)}")
+            print(f"{Fore.RED}Error resetting IPTables rules: {str(e)}{Style.RESET_ALL}")
+            logging.error(f"Error resetting IPTables rules: {str(e)}")
+        
+        input("\nPress Enter to return to main menu...")
 
     def apply_basic_protection(self):
         """Apply basic protection rules"""
         try:
             # First clean up existing rules
-            self.reset_firewall_rules()
+            self.reset_iptables_rules()
             
             # Set default policies
             subprocess.run(['iptables', '-P', 'INPUT', 'DROP'], check=True)
@@ -1022,19 +1014,36 @@ class OpenMammoth:
             # Allow established connections
             subprocess.run(['iptables', '-A', 'INPUT', '-m', 'conntrack', '--ctstate', 'ESTABLISHED,RELATED', '-j', 'ACCEPT'], check=True)
             
-            # Allow SSH connections (can be changed as needed)
-            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '22', '-j', 'ACCEPT'], check=True)
+            # Allow all traffic from local network
+            for network in ['192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12']:
+                subprocess.run(['iptables', '-A', 'INPUT', '-s', network, '-j', 'ACCEPT'], check=True)
             
-            # Allow ping requests (optional)
-            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'icmp', '--icmp-type', 'echo-request', '-j', 'ACCEPT'], check=True)
+            # Allow common services
+            common_ports = [
+                ('tcp', '22'),    # SSH
+                ('tcp', '80'),    # HTTP
+                ('tcp', '443'),   # HTTPS
+                ('udp', '53'),    # DNS
+                ('tcp', '53'),    # DNS
+                ('udp', '67:68'), # DHCP
+                ('tcp', '21'),    # FTP
+                ('tcp', '990'),   # FTPS
+                ('tcp', '143'),   # IMAP
+                ('tcp', '993'),   # IMAPS
+                ('tcp', '110'),   # POP3
+                ('tcp', '995'),   # POP3S
+                ('tcp', '25'),    # SMTP
+                ('tcp', '587'),   # SMTP
+                ('tcp', '465'),   # SMTPS
+                ('udp', '123'),   # NTP
+            ]
             
-            # Allow DNS traffic
-            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'udp', '--dport', '53', '-j', 'ACCEPT'], check=True)
-            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '53', '-j', 'ACCEPT'], check=True)
+            for proto, port in common_ports:
+                subprocess.run(['iptables', '-A', 'INPUT', '-p', proto, '--dport', port, '-j', 'ACCEPT'], check=True)
             
-            # Allow HTTP and HTTPS traffic
-            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '80', '-j', 'ACCEPT'], check=True)
-            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'tcp', '--dport', '443', '-j', 'ACCEPT'], check=True)
+            # Allow ping requests with rate limiting
+            subprocess.run(['iptables', '-A', 'INPUT', '-p', 'icmp', '--icmp-type', 'echo-request', 
+                          '-m', 'limit', '--limit', '1/s', '-j', 'ACCEPT'], check=True)
             
             # Block IPs in the blacklist
             for ip in self.blacklist:
@@ -1045,8 +1054,11 @@ class OpenMammoth:
                 }
             
             logging.info("Basic protection rules applied")
+            print(f"{Fore.GREEN}Basic protection rules applied successfully.{Style.RESET_ALL}")
+            
         except Exception as e:
             logging.error(f"Error applying basic protection rules: {str(e)}")
+            print(f"{Fore.RED}Error applying protection rules: {str(e)}{Style.RESET_ALL}")
 
     def show_help(self):
         print(f"\n{Fore.CYAN}=== OpenMammoth Help ==={Style.RESET_ALL}")
@@ -1081,7 +1093,7 @@ class OpenMammoth:
 
     def show_about(self):
         print(f"\n{Fore.CYAN}=== About OpenMammoth ==={Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Version: 1.0.0{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Version: 1.5{Style.RESET_ALL}")
         print(f"{Fore.GREEN}Author: root0emir{Style.RESET_ALL}")
         print(f"{Fore.BLUE}License: MIT{Style.RESET_ALL}")
         print("\nOpenMammoth is a powerful network protection tool designed to")
@@ -1103,31 +1115,60 @@ class OpenMammoth:
         print(f"{Fore.RED}•{Style.RESET_ALL} Fragment Attacks")
         print(f"{Fore.RED}•{Style.RESET_ALL} Malformed Packets")
         print(f"{Fore.RED}•{Style.RESET_ALL} IP Spoofing")
-        print(f"\n{Fore.CYAN}GitHub: https://github.com/root0emir{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}GitHub: https://github.com/Securonis/OpenMammoth {Style.RESET_ALL}")
         input("\nPress Enter to return to main menu...")
 
     def get_available_interfaces(self):
         """Get available network interfaces"""
         interfaces = []
         try:
-            for iface in get_if_list():
-                try:
-                    # Get interface ip
-                    ip = get_if_addr(iface)
-                    if ip:
-                        # get interface mac
-                        mac = get_if_hwaddr(iface)
-                        interfaces.append({
-                            'name': iface,
-                            'ip': ip,
-                            'mac': mac,
-                            'status': 'UP' if get_if_raw_hwaddr(iface) else 'DOWN'
-                        })
-                except:
-                    continue
-        except:
-            pass
-        return interfaces
+            # Use ip command to get interface information
+            ip_output = subprocess.check_output(['ip', 'addr', 'show'], text=True)
+            current_interface = None
+            
+            for line in ip_output.split('\n'):
+                # Match interface line
+                if line and not line.startswith(' '):
+                    interface_match = re.match(r'\d+:\s+([^:@]+)[:.@]', line)
+                    if interface_match:
+                        current_interface = {
+                            'name': interface_match.group(1),
+                            'ip': '',
+                            'mac': '',
+                            'status': 'DOWN'
+                        }
+                        if 'UP' in line:
+                            current_interface['status'] = 'UP'
+                        interfaces.append(current_interface)
+                
+                # Match IP address line
+                elif current_interface and 'inet ' in line:
+                    ip_match = re.search(r'inet\s+([0-9.]+)/', line)
+                    if ip_match:
+                        current_interface['ip'] = ip_match.group(1)
+                
+                # Match MAC address line
+                elif current_interface and 'link/ether' in line:
+                    mac_match = re.search(r'link/ether\s+([0-9a-fA-F:]+)', line)
+                    if mac_match:
+                        current_interface['mac'] = mac_match.group(1)
+
+            # Filter out interfaces without IP addresses (except lo)
+            interfaces = [iface for iface in interfaces if iface['ip'] or iface['name'] == 'lo']
+            
+            if not interfaces:
+                logging.warning("No network interfaces found with IP addresses")
+            else:
+                logging.info(f"Found {len(interfaces)} network interfaces")
+                
+            return interfaces
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error running ip command: {str(e)}")
+            return []
+        except Exception as e:
+            logging.error(f"Error getting network interfaces: {str(e)}")
+            return []
 
     def display_interfaces(self):
         """Display network interfaces"""
@@ -1170,7 +1211,6 @@ class OpenMammoth:
                 print(f"{Fore.RED}Please enter a valid number!{Style.RESET_ALL}")
 
     def load_threat_intel(self):
-        """Tehdit istihbaratı veritabanını yükle"""
         try:
             intel_path = os.path.join(self.config_dir, 'threat_intel.json')
             if os.path.exists(intel_path):
@@ -1515,6 +1555,61 @@ class OpenMammoth:
         # Display available interfaces and select one
         self.select_interface()
 
+    def view_protection_status(self):
+        """View current protection status"""
+        os.system('clear')
+        print(f"\n{Fore.CYAN}=== Protection Status ==={Style.RESET_ALL}")
+        
+        if self.is_running:
+            uptime = time.time() - self.start_time
+            hours, remainder = divmod(uptime, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            print(f"\n{Fore.GREEN}[+] Protection Status: ACTIVE{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Interface: {self.interface}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Protection Level: {self.protection_level}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Advanced Protection: {'Enabled' if self.advanced_protection else 'Disabled'}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Threat Intelligence: {'Enabled' if self.use_threat_intel else 'Disabled'}{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}[*] Uptime: {int(hours)}h {int(minutes)}m {int(seconds)}s{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}Current Statistics:{Style.RESET_ALL}")
+            print(f"Total Packets: {self.stats['total_packets']}")
+            print(f"Blocked Packets: {self.stats['blocked_packets']}")
+            print(f"Attacks Detected: {self.stats['attacks_detected']}")
+            print(f"Active Blocks: {len(self.blocked_ips)}")
+        else:
+            print(f"\n{Fore.RED}[!] Protection Status: INACTIVE{Style.RESET_ALL}")
+            print(f"\n{Fore.YELLOW}Use 'Start Protection' to enable network protection.{Style.RESET_ALL}")
+        
+        input("\nPress Enter to return to main menu...")
+
+    def is_local_network(self, ip):
+        """Enhanced check for local network IPs"""
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            
+            # Check if IP is in local networks list
+            if ip in self.local_ips:
+                return True
+            
+            # Check common local IP patterns
+            if ip.startswith('192.168.') or ip.startswith('10.') or ip.startswith('172.'):
+                return True
+            
+            # Check if IP is router/gateway
+            if ip.endswith('.1') or ip.endswith('.254'):
+                return True
+            
+            # Check private IP ranges
+            return any([
+                ip_obj in ipaddress.ip_network('10.0.0.0/8'),
+                ip_obj in ipaddress.ip_network('172.16.0.0/12'),
+                ip_obj in ipaddress.ip_network('192.168.0.0/16'),
+                ip_obj in ipaddress.ip_network('127.0.0.0/8'),
+                ip_obj in ipaddress.ip_network('169.254.0.0/16')  # Link-local addresses
+            ])
+        except ValueError:
+            return False
+
 def main():
     if os.geteuid() != 0:
         print(f"{Fore.RED}Error: This program must be run as root.{Style.RESET_ALL}")
@@ -1525,3 +1620,5 @@ def main():
 
 if __name__ == "__main__":
     main() 
+
+    
