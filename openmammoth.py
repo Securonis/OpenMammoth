@@ -667,12 +667,11 @@ class OpenMammoth:
             print(f"{Fore.CYAN}6. View Blocked IPs{Style.RESET_ALL}")
             print(f"{Fore.GREEN}7. Advanced Options{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}8. Configure Network Interfaces{Style.RESET_ALL}")
-            print(f"{Fore.WHITE}9. Reset IPTables{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}10. Help{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}11. About{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}9. Help{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}10. About{Style.RESET_ALL}")
             print(f"{Fore.RED}0. Exit{Style.RESET_ALL}")
             
-            choice = input("\nEnter your choice (0-11): ")
+            choice = input("\nEnter your choice (0-10): ")
             
             if choice == "1":
                 self.start_protection()
@@ -691,10 +690,8 @@ class OpenMammoth:
             elif choice == "8":
                 self.configure_interfaces()
             elif choice == "9":
-                self.reset_iptables_rules()
-            elif choice == "10":
                 self.show_help()
-            elif choice == "11":
+            elif choice == "10":
                 self.show_about()
             elif choice == "0":
                 if self.is_running:
@@ -713,9 +710,10 @@ class OpenMammoth:
             print(f"4. Network Interface (Current: {self.interface if self.interface else 'Not selected'})")
             print(f"5. Threat Intelligence (Current: {'Enabled' if self.use_threat_intel else 'Disabled'})")
             print(f"6. Auto Updates (Current: {'Enabled' if self.auto_update else 'Disabled'})")
-            print("7. Back to Main Menu")
+            print(f"7. Reset IPTables Rules")
+            print("8. Back to Main Menu")
             
-            choice = input("\nEnter your choice (1-7): ")
+            choice = input("\nEnter your choice (1-8): ")
             
             if choice == "1":
                 level = input("Enter protection level (1-4): ")
@@ -754,6 +752,8 @@ class OpenMammoth:
                     print(f"{Fore.YELLOW}Checking for updates...{Style.RESET_ALL}")
                     self.check_for_updates()
             elif choice == "7":
+                self.reset_iptables_rules()
+            elif choice == "8":
                 break
             else:
                 print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
@@ -964,38 +964,71 @@ class OpenMammoth:
         input("\nPress Enter to return to Firewall Settings...")
 
     def reset_iptables_rules(self):
-        """Reset all IPTables rules and restore default policy"""
+        """Reset all IPTables rules and restore default policy with enhanced confirmations"""
         try:
-            print(f"\n{Fore.YELLOW}Warning: This will reset all IPTables rules.{Style.RESET_ALL}")
-            confirm = input("Are you sure you want to continue? (y/n): ")
+            # First confirmation
+            print(f"\n{Fore.RED}WARNING: This will reset all IPTables rules!{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}This action will:{Style.RESET_ALL}")
+            print("1. Clear all existing firewall rules")
+            print("2. Reset all chains to default policy")
+            print("3. Remove all custom chains")
+            confirm1 = input("\nProceed? [y/N]: ").lower() or 'n'
             
-            if confirm.lower() == 'y':
-                # Flush all rules
-                subprocess.run(['iptables', '-F'], check=True)
-                subprocess.run(['iptables', '-X'], check=True)
-                subprocess.run(['iptables', '-t', 'nat', '-F'], check=True)
-                subprocess.run(['iptables', '-t', 'nat', '-X'], check=True)
-                subprocess.run(['iptables', '-t', 'mangle', '-F'], check=True)
-                subprocess.run(['iptables', '-t', 'mangle', '-X'], check=True)
-                
-                # Set default policies to ACCEPT
-                subprocess.run(['iptables', '-P', 'INPUT', 'ACCEPT'], check=True)
-                subprocess.run(['iptables', '-P', 'FORWARD', 'ACCEPT'], check=True)
-                subprocess.run(['iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
-                
-                # Clear blocked IPs list
-                self.blocked_ips.clear()
-                
-                print(f"{Fore.GREEN}Successfully reset all IPTables rules.{Style.RESET_ALL}")
-                logging.info("IPTables rules reset by user")
-            else:
+            if confirm1 != 'y':
                 print(f"{Fore.YELLOW}Operation cancelled.{Style.RESET_ALL}")
-                
+                return
+            
+            # Second confirmation - Tor warning
+            print(f"\n{Fore.RED}IMPORTANT TOR NETWORK WARNING:{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Resetting IPTables rules will:{Style.RESET_ALL}")
+            print("1. Disable any existing Tor routing rules")
+            print("2. Potentially expose your real IP address")
+            print("3. Break anonymity if you're using Tor")
+            confirm2 = input("\nConfirm you are NOT using Tor? [y/N]: ").lower() or 'n'
+            
+            if confirm2 != 'y':
+                print(f"{Fore.YELLOW}Operation cancelled for your security.{Style.RESET_ALL}")
+                return
+            
+            # Final confirmation
+            print(f"\n{Fore.RED}FINAL CONFIRMATION:{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Please confirm that:{Style.RESET_ALL}")
+            print("1. You understand all current firewall rules will be deleted")
+            print("2. You are NOT using Tor for anonymity")
+            print("3. You accept the security implications")
+            confirm3 = input("\nAre you absolutely sure? [y/N]: ").lower() or 'n'
+            
+            if confirm3 != 'y':
+                print(f"{Fore.YELLOW}Operation cancelled.{Style.RESET_ALL}")
+                return
+            
+            # Proceed with reset
+            print(f"\n{Fore.YELLOW}Resetting IPTables rules...{Style.RESET_ALL}")
+            
+            # Flush all rules
+            subprocess.run(['iptables', '-F'], check=True)
+            subprocess.run(['iptables', '-X'], check=True)
+            subprocess.run(['iptables', '-t', 'nat', '-F'], check=True)
+            subprocess.run(['iptables', '-t', 'nat', '-X'], check=True)
+            subprocess.run(['iptables', '-t', 'mangle', '-F'], check=True)
+            subprocess.run(['iptables', '-t', 'mangle', '-X'], check=True)
+            
+            # Set default policies to ACCEPT
+            subprocess.run(['iptables', '-P', 'INPUT', 'ACCEPT'], check=True)
+            subprocess.run(['iptables', '-P', 'FORWARD', 'ACCEPT'], check=True)
+            subprocess.run(['iptables', '-P', 'OUTPUT', 'ACCEPT'], check=True)
+            
+            # Clear blocked IPs list
+            self.blocked_ips.clear()
+            
+            print(f"{Fore.GREEN}Successfully reset all IPTables rules.{Style.RESET_ALL}")
+            logging.info("IPTables rules reset by user after triple confirmation")
+            
         except Exception as e:
             print(f"{Fore.RED}Error resetting IPTables rules: {str(e)}{Style.RESET_ALL}")
             logging.error(f"Error resetting IPTables rules: {str(e)}")
         
-        input("\nPress Enter to return to main menu...")
+        input("\nPress Enter to continue...")
 
     def apply_basic_protection(self):
         """Apply basic protection rules"""
