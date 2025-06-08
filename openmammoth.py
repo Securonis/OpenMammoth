@@ -87,7 +87,7 @@ class OpenMammoth:
             print(self.get_ascii_art())
             print(f"\n{Fore.RED}Warning: No network interfaces found!{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}You can configure network interfaces from the main menu.{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Option 7: Configure Network Interfaces{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Option 8: Configure Network Interfaces{Style.RESET_ALL}")
             input("\nPress Enter to continue to main menu...")
 
     def get_ascii_art(self):
