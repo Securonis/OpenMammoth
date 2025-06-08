@@ -392,8 +392,7 @@ class OpenMammoth:
         """TTL değerindeki anomalileri kontrol et"""
         if IP in packet:
             ttl = packet[IP].ttl
-            # Normal TTL değerleri genellikle 32, 64, 128, 255 civarında olur
-            # Çok düşük veya anormal TTL değerleri şüphelidir
+
             if ttl < 5 or ttl > 250:
                 return True
         return False
@@ -401,7 +400,6 @@ class OpenMammoth:
     def check_tcp_sequence_prediction(self, packet):
         """TCP sequence tahmin saldırılarını kontrol et"""
         if TCP in packet:
-            # Basit bir kontrol - gerçek bir uygulamada daha karmaşık olabilir
             seq = packet[TCP].seq
             if seq == 0 or seq == 1:
                 return True
@@ -409,7 +407,6 @@ class OpenMammoth:
 
     def block_ip(self, ip, reason="Attack detected"):
         """Block an IP address"""
-        # Don't try to block our own IPs
         if ip in self.local_ips:
             logging.warning(f"Attempt to block local IP {ip} prevented")
             return False
@@ -447,7 +444,7 @@ class OpenMammoth:
     def start_protection(self):
         if not self.interface:
             print(f"{Fore.RED}Error: No network interface selected!{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Please select a network interface first (Option 7).{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Please select a network interface first (Option 8).{Style.RESET_ALL}")
             input("\nPress Enter to return to main menu...")
             return False
 
@@ -1126,7 +1123,7 @@ class OpenMammoth:
 
     def show_about(self):
         print(f"\n{Fore.CYAN}=== About OpenMammoth ==={Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}Version: 1.5{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Version: 2.0{Style.RESET_ALL}")
         print(f"{Fore.GREEN}Author: root0emir{Style.RESET_ALL}")
         print(f"{Fore.BLUE}License: MIT{Style.RESET_ALL}")
         print("\nOpenMammoth is a powerful network protection tool designed to")
@@ -1251,7 +1248,7 @@ class OpenMammoth:
                     self.threat_intel_db = json.load(f)
                     logging.info(f"Loaded {len(self.threat_intel_db)} threat intelligence entries")
             else:
-                # İlk kez çalıştırılıyorsa, boş bir veritabanı oluştur
+
                 self.update_threat_intel()
         except Exception as e:
             logging.error(f"Error loading threat intelligence: {str(e)}")
