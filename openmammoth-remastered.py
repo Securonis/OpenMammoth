@@ -2418,197 +2418,169 @@ class OpenMammoth:
         return False
 
     def cleanup_old_data(self):
-        """Clean up old tracking data to prevent memory leaks and reduce resource usage"""
+        """Clean up old tracking data to prevent memory leaks and reduce resource usage
+        New implementation to completely eliminate timestamp errors"""
         try:
+            # Use nullcontext for optional lock handling
+            from contextlib import nullcontext
             current_time = time.time()
             cutoff_time = current_time - 3600  # Remove data older than 1 hour
+            attack_cutoff = current_time - 14400  # 4 hours for attack sources
+            max_entries = 5000  # Max entries for standard trackers
+            attack_max_entries = 10000  # More entries for attack history
             
-            # Add connection and packet rate cleanup from cleanup_data function
-            # Clean up expired entries in connection tracker
-            try:
-                with self.connection_lock:
-                    for ip in list(self.connection_tracker.keys()):
-                        try:
-                            # Check if the entry has a valid structure
-                            if not isinstance(self.connection_tracker[ip], dict):
-                                logging.warning(f"Invalid connection tracker entry for {ip}, removing entry")
-                                del self.connection_tracker[ip]
-                                continue
-                            
-                            # Check if last_seen key exists
-                            if 'last_seen' not in self.connection_tracker[ip]:
-                                logging.warning(f"Missing last_seen timestamp for connection_tracker IP {ip}, removing entry")
-                                del self.connection_tracker[ip]
+            # Define helper function for safe dictionary cleanup with timestamp checking
+            def safe_clean_dictionary(dictionary, timestamp_key, lock=None, cutoff=cutoff_time, 
+                                      max_size=max_entries, popitem_last=False):
+                """Safely clean a dictionary by removing old entries and limiting size
+                
+                Args:
+                    dictionary: Dictionary to clean
+                    timestamp_key: Key within dictionary entries that contains the timestamp value
+                    lock: Optional lock to use for thread safety
+                    cutoff: Timestamp cutoff value
+                    max_size: Maximum size of dictionary
+                    popitem_last: Whether to remove newest (True) or oldest (False) items when limiting size
+                """
+                if dictionary is None or not isinstance(dictionary, dict):
+                    logging.debug("Skipping cleanup for non-dictionary object")
+                    return
+                    
+                # Get the proper lock if none provided
+                if lock is None:
+                    if dictionary is self.connection_tracker:
+                        lock = self.connection_lock
+                    elif dictionary is self.packet_rates:
+                        lock = self.packet_rates_lock
+                    elif dictionary is self.tcp_flags:
+                        lock = self.tcp_flags_lock
+                    elif dictionary is self.fragments:
+                        lock = self.fragment_lock
+                    else:
+                        lock = nullcontext()
+                        
+                context_mgr = lock if lock is not None else nullcontext()
+                try:
+                    with context_mgr:
+                        # First pass: remove invalid entries and expired entries
+                        keys_to_remove = []
+                        # Get all keys first to avoid modification during iteration
+                        keys = list(dictionary.keys())
+                        
+                        for key in keys:
+                            if key is None:
+                                keys_to_remove.append(key)
                                 continue
                                 
-                            # Check if timestamp is a valid number
-                            if not isinstance(self.connection_tracker[ip]['last_seen'], (int, float)):
-                                logging.warning(f"Invalid timestamp type for connection_tracker IP {ip}, removing entry")
-                                del self.connection_tracker[ip]
-                                continue
-                            
-                            # Then check if it's expired
-                            if current_time - self.connection_tracker[ip]['last_seen'] > 3600:  # 1 hour
-                                del self.connection_tracker[ip]
-                        except Exception as e:
-                            logging.error(f"Error processing connection tracker entry for {ip}: {str(e)}")
                             try:
-                                del self.connection_tracker[ip]  # Remove problematic entry
-                            except:
-                                pass
-            except Exception as e:
-                logging.error(f"Error in connection tracker cleanup: {str(e)}")
-            
-            # Clean up packet rates
-            try:
-                with self.packet_rates_lock:
-                    for ip in list(self.packet_rates.keys()):
-                        try:
-                            # Check if the entry has a valid structure
-                            if not isinstance(self.packet_rates[ip], dict):
-                                logging.warning(f"Invalid packet_rates entry for {ip}, removing entry")
-                                del self.packet_rates[ip]
-                                continue
-                            
-                            # Check if timestamp key exists
-                            if 'timestamp' not in self.packet_rates[ip]:
-                                logging.warning(f"Missing timestamp for packet_rates IP {ip}, removing entry")
-                                del self.packet_rates[ip]
-                                continue
+                                # Entry must exist and be a dictionary
+                                entry = dictionary.get(key)
+                                if entry is None or not isinstance(entry, dict):
+                                    keys_to_remove.append(key)
+                                    continue
+                                    
+                                # Entry must have timestamp key
+                                if timestamp_key not in entry:
+                                    keys_to_remove.append(key)
+                                    continue
+                                    
+                                # Timestamp must be a valid number
+                                timestamp = entry.get(timestamp_key)
+                                if timestamp is None or not isinstance(timestamp, (int, float)):
+                                    keys_to_remove.append(key)
+                                    continue
+                                    
+                                # Check if entry is too old
+                                if timestamp < cutoff:
+                                    # Special case for attack sources with blocked flag
+                                    if dictionary is getattr(self, 'attack_sources', {}) and entry.get('blocked', False):
+                                        if timestamp < (cutoff_time - 86400):  # 24 hours older than normal cutoff
+                                            keys_to_remove.append(key)
+                                    else:
+                                        keys_to_remove.append(key)
+                            except Exception as e:
+                                logging.debug(f"Error checking dictionary entry {key}: {str(e)}")
+                                keys_to_remove.append(key)
                                 
-                            # Check if timestamp is a valid number
-                            if not isinstance(self.packet_rates[ip]['timestamp'], (int, float)):
-                                logging.warning(f"Invalid timestamp type for packet_rates IP {ip}, removing entry")
-                                del self.packet_rates[ip]
-                                continue
-                                
-                            # Then check if it's expired
-                            if current_time - self.packet_rates[ip]['timestamp'] > 3600:  # 1 hour
-                                del self.packet_rates[ip]
-                        except Exception as e:
-                            logging.error(f"Error processing packet rates entry for {ip}: {str(e)}")
+                        # Safe removal of invalid/expired entries
+                        for key in keys_to_remove:
                             try:
-                                del self.packet_rates[ip]  # Remove problematic entry
-                            except:
-                                pass
-            except Exception as e:
-                logging.error(f"Error in packet rates cleanup: {str(e)}")
+                                dictionary.pop(key, None)
+                            except Exception as e:
+                                logging.debug(f"Error removing key {key}: {str(e)}")
+                                
+                        # Second pass: limit dictionary size if still too large
+                        if len(dictionary) > max_size:
+                            logging.debug(f"Dictionary size {len(dictionary)} exceeds limit {max_size}, trimming")
+                            try:
+                                # For timestamp-based dictionaries, we can sort by timestamp
+                                sorted_items = []
+                                for key, value in dictionary.items():
+                                    try:
+                                        if isinstance(value, dict) and timestamp_key in value:
+                                            timestamp = value[timestamp_key]
+                                            if isinstance(timestamp, (int, float)):
+                                                sorted_items.append((key, timestamp))
+                                    except Exception:
+                                        pass
+                                        
+                                if sorted_items:
+                                    # Sort by timestamp (oldest first)
+                                    sorted_items.sort(key=lambda x: x[1])
+                                    # Remove oldest entries until we're under the limit
+                                    to_remove = len(dictionary) - max_size
+                                    for i in range(min(to_remove, len(sorted_items))):
+                                        try:
+                                            dictionary.pop(sorted_items[i][0], None)
+                                        except Exception:
+                                            pass
+                            except Exception as e:
+                                logging.debug(f"Error during size limiting: {str(e)}")
+                except Exception as e:
+                    logging.error(f"Error during dictionary cleanup: {str(e)}")
             
-            # Define maximum sizes for OrderedDict tracking structures to prevent unbounded growth
-            # This is critical for preventing memory issues during extended operation
-            max_entries = 5000  # Maximum entries to keep in tracking dictionaries
+            # Use our helper function to clean all dictionaries in a consistent manner
             
-            # Using locks to ensure thread safety during cleanup
-            with self.stats_lock:
-                # Clean and limit syn_tracker dictionary
+            # 1. Clean up connection tracker
+            safe_clean_dictionary(self.connection_tracker, 'last_seen', 
+                                  self.connection_lock, cutoff_time, max_entries)
+            
+            # 2. Clean up packet rates
+            safe_clean_dictionary(self.packet_rates, 'timestamp', 
+                                  self.packet_rates_lock, cutoff_time, max_entries)
+                                  
+            # 3. Clean up TCP flags
+            if hasattr(self, 'tcp_flags_tracker'):
+                safe_clean_dictionary(self.tcp_flags_tracker, 'last_seen', 
+                                      self.tcp_flags_lock, cutoff_time, max_entries)
+                                  
+            # 4. Clean up various attack trackers with proper timestamp keys
+            with self.stats_lock:  # Use stats lock for these trackers
+                # SYN flood tracker
                 if hasattr(self, 'syn_tracker'):
-                    # Remove old entries first
-                    for ip in list(self.syn_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.syn_tracker[ip]:
-                            logging.debug(f"Missing timestamp for syn_tracker IP {ip}, removing entry")
-                            del self.syn_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.syn_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.syn_tracker[ip]
-                    # Then enforce size limit by removing oldest entries
-                    while len(self.syn_tracker) > max_entries:
-                        self.syn_tracker.popitem(last=False)  # Remove oldest entry (FIFO)
+                    safe_clean_dictionary(self.syn_tracker, 'timestamp', None, cutoff_time, max_entries)
                 
-                # Clean and limit udp_tracker dictionary
+                # UDP flood tracker
                 if hasattr(self, 'udp_tracker'):
-                    for ip in list(self.udp_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.udp_tracker[ip]:
-                            logging.debug(f"Missing timestamp for udp_tracker IP {ip}, removing entry")
-                            del self.udp_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.udp_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.udp_tracker[ip]
-                    while len(self.udp_tracker) > max_entries:
-                        self.udp_tracker.popitem(last=False)
+                    safe_clean_dictionary(self.udp_tracker, 'timestamp', None, cutoff_time, max_entries)
                 
-                # Clean and limit icmp_tracker
+                # ICMP flood tracker
                 if hasattr(self, 'icmp_tracker'):
-                    for ip in list(self.icmp_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.icmp_tracker[ip]:
-                            logging.debug(f"Missing timestamp for icmp_tracker IP {ip}, removing entry")
-                            del self.icmp_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.icmp_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.icmp_tracker[ip]
-                    while len(self.icmp_tracker) > max_entries:
-                        self.icmp_tracker.popitem(last=False)
+                    safe_clean_dictionary(self.icmp_tracker, 'timestamp', None, cutoff_time, max_entries)
                 
-                # Clean and limit port_scan_tracker
+                # Port scan tracker
                 if hasattr(self, 'port_scan_tracker'):
-                    for ip in list(self.port_scan_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.port_scan_tracker[ip]:
-                            logging.debug(f"Missing timestamp for port_scan_tracker IP {ip}, removing entry")
-                            del self.port_scan_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.port_scan_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.port_scan_tracker[ip]  
-                    while len(self.port_scan_tracker) > max_entries:
-                        self.port_scan_tracker.popitem(last=False)
+                    safe_clean_dictionary(self.port_scan_tracker, 'timestamp', None, cutoff_time, max_entries)
             
-            # Using tcp_flags_lock for these specific structures
-            with self.tcp_flags_lock:
-                # Clean and limit tcp_flags_tracker
-                if hasattr(self, 'tcp_flags_tracker'):
-                    for ip in list(self.tcp_flags_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.tcp_flags_tracker[ip]:
-                            logging.debug(f"Missing timestamp for tcp_flags_tracker IP {ip}, removing entry")
-                            del self.tcp_flags_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.tcp_flags_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.tcp_flags_tracker[ip]
-                    while len(self.tcp_flags_tracker) > max_entries:
-                        self.tcp_flags_tracker.popitem(last=False)
-                
-                # Clean and limit seq_tracker
-                if hasattr(self, 'seq_tracker'):
-                    for ip in list(self.seq_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.seq_tracker[ip]:
-                            logging.debug(f"Missing timestamp for seq_tracker IP {ip}, removing entry")
-                            del self.seq_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.seq_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.seq_tracker[ip]
-                    while len(self.seq_tracker) > max_entries:
-                        self.seq_tracker.popitem(last=False)
+            # 5. Clean up TCP-specific trackers with tcp_flags_lock
+            # Note: We've already handled tcp_flags_tracker earlier, but we'll also clean up seq_tracker here
+            # Using correct timestamp keys for each tracker
+            if hasattr(self, 'seq_tracker'):
+                safe_clean_dictionary(self.seq_tracker, 'timestamp', self.tcp_flags_lock, cutoff_time, max_entries)
             
-            # Clean fragment tracker with its own lock
-            with self.fragment_lock:
-                if hasattr(self, 'fragment_tracker'):
-                    for ip in list(self.fragment_tracker.keys()):
-                        # First check if timestamp key exists
-                        if 'timestamp' not in self.fragment_tracker[ip]:
-                            logging.debug(f"Missing timestamp for fragment_tracker IP {ip}, removing entry")
-                            del self.fragment_tracker[ip]
-                            continue
-                            
-                        # Then check if it's expired
-                        if self.fragment_tracker[ip]['timestamp'] < cutoff_time:
-                            del self.fragment_tracker[ip]
-                    while len(self.fragment_tracker) > max_entries:
-                        self.fragment_tracker.popitem(last=False)
+            # 6. Clean up fragment tracker with its own lock
+            if hasattr(self, 'fragment_tracker'):
+                safe_clean_dictionary(self.fragment_tracker, 'timestamp', self.fragment_lock, cutoff_time, max_entries)
             
             # Clean attack_sources to prevent unbounded growth
             if hasattr(self, 'attack_sources'):
