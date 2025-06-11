@@ -34,11 +34,11 @@ class OpenMammoth:
         self.udp_flood_tracker = {}  # Track UDP packets for UDP flood detection
         self.icmp_flood_tracker = {} # Track ICMP packets for ICMP flood detection
         
-        # Attack thresholds and timeouts
-        self.syn_flood_threshold = 50       # Number of SYNs before considering it a flood
-        self.syn_flood_timeout = 5          # Time window for SYN flood detection (seconds)
-        self.port_scan_threshold = 15       # Number of ports before considering it a scan
-        self.port_scan_timeout = 10         # Time window for port scan detection (seconds)
+        # Attack thresholds and timeouts - significantly lowered for testing
+        self.syn_flood_threshold = 10       # Number of SYNs before considering it a flood (was 50)
+        self.syn_flood_timeout = 60         # Time window for SYN flood detection (seconds) (was 5)
+        self.port_scan_threshold = 5        # Number of ports before considering it a scan (was 15)
+        self.port_scan_timeout = 60         # Time window for port scan detection (seconds) (was 10)
         self.flood_alerting_interval = 60   # Minimum time between alerts (seconds)
         self.last_alert_time = {}           # Track when alerts were last sent
         
@@ -3045,6 +3045,27 @@ class OpenMammoth:
         except Exception as e:
             logging.error(f"Error setting up signal handlers: {str(e)}")
             print(f"{Fore.RED}Warning: Could not set up signal handlers: {str(e)}{Style.RESET_ALL}")
+            
+    def block_ip(self, ip, reason="Unknown"):
+        """Add an IP to the blacklist"""
+        try:
+            if ip not in getattr(self, 'blacklist', []):
+                self.blacklist.append(ip)
+                logging.warning(f"Added {ip} to blacklist: {reason}")
+                # Print to console for immediate visibility
+                print(f"{Fore.RED}[ALERT] Blocked {ip}: {reason}{Style.RESET_ALL}")
+                
+                with self.stats_lock:
+                    if 'ips_blocked' not in self.stats:
+                        self.stats['ips_blocked'] = 0
+                    self.stats['ips_blocked'] += 1
+                return True
+            else:
+                # Already blocked
+                return False
+        except Exception as e:
+            logging.error(f"Error blocking IP {ip}: {str(e)}")
+            return False
             
     def stop_protection(self):
         """Stop packet capture and all monitoring threads"""
