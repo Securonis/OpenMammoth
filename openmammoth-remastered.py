@@ -2425,16 +2425,74 @@ class OpenMammoth:
             
             # Add connection and packet rate cleanup from cleanup_data function
             # Clean up expired entries in connection tracker
-            with self.connection_lock:
-                for ip in list(self.connection_tracker.keys()):
-                    if current_time - self.connection_tracker[ip]['last_seen'] > 3600:  # 1 hour
-                        del self.connection_tracker[ip]
+            try:
+                with self.connection_lock:
+                    for ip in list(self.connection_tracker.keys()):
+                        try:
+                            # Check if the entry has a valid structure
+                            if not isinstance(self.connection_tracker[ip], dict):
+                                logging.warning(f"Invalid connection tracker entry for {ip}, removing entry")
+                                del self.connection_tracker[ip]
+                                continue
+                            
+                            # Check if last_seen key exists
+                            if 'last_seen' not in self.connection_tracker[ip]:
+                                logging.warning(f"Missing last_seen timestamp for connection_tracker IP {ip}, removing entry")
+                                del self.connection_tracker[ip]
+                                continue
+                                
+                            # Check if timestamp is a valid number
+                            if not isinstance(self.connection_tracker[ip]['last_seen'], (int, float)):
+                                logging.warning(f"Invalid timestamp type for connection_tracker IP {ip}, removing entry")
+                                del self.connection_tracker[ip]
+                                continue
+                            
+                            # Then check if it's expired
+                            if current_time - self.connection_tracker[ip]['last_seen'] > 3600:  # 1 hour
+                                del self.connection_tracker[ip]
+                        except Exception as e:
+                            logging.error(f"Error processing connection tracker entry for {ip}: {str(e)}")
+                            try:
+                                del self.connection_tracker[ip]  # Remove problematic entry
+                            except:
+                                pass
+            except Exception as e:
+                logging.error(f"Error in connection tracker cleanup: {str(e)}")
             
             # Clean up packet rates
-            with self.packet_rates_lock:
-                for ip in list(self.packet_rates.keys()):
-                    if current_time - self.packet_rates[ip]['timestamp'] > 3600:  # 1 hour
-                        del self.packet_rates[ip]
+            try:
+                with self.packet_rates_lock:
+                    for ip in list(self.packet_rates.keys()):
+                        try:
+                            # Check if the entry has a valid structure
+                            if not isinstance(self.packet_rates[ip], dict):
+                                logging.warning(f"Invalid packet_rates entry for {ip}, removing entry")
+                                del self.packet_rates[ip]
+                                continue
+                            
+                            # Check if timestamp key exists
+                            if 'timestamp' not in self.packet_rates[ip]:
+                                logging.warning(f"Missing timestamp for packet_rates IP {ip}, removing entry")
+                                del self.packet_rates[ip]
+                                continue
+                                
+                            # Check if timestamp is a valid number
+                            if not isinstance(self.packet_rates[ip]['timestamp'], (int, float)):
+                                logging.warning(f"Invalid timestamp type for packet_rates IP {ip}, removing entry")
+                                del self.packet_rates[ip]
+                                continue
+                                
+                            # Then check if it's expired
+                            if current_time - self.packet_rates[ip]['timestamp'] > 3600:  # 1 hour
+                                del self.packet_rates[ip]
+                        except Exception as e:
+                            logging.error(f"Error processing packet rates entry for {ip}: {str(e)}")
+                            try:
+                                del self.packet_rates[ip]  # Remove problematic entry
+                            except:
+                                pass
+            except Exception as e:
+                logging.error(f"Error in packet rates cleanup: {str(e)}")
             
             # Define maximum sizes for OrderedDict tracking structures to prevent unbounded growth
             # This is critical for preventing memory issues during extended operation
