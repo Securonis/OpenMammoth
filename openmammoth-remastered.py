@@ -11,6 +11,9 @@ import hashlib
 import socket
 import subprocess
 import requests
+import random
+import math  # For entropy calculation in DNS tunneling detection
+import ipapi  # For IP geolocation and VPN detection
 from datetime import datetime
 from scapy.all import *
 from scapy.layers.inet import IP, TCP, UDP, ICMP
@@ -27,6 +30,106 @@ init()
 
 class OpenMammoth:
     def __init__(self):
+        # Initialize attack tracking dictionaries
+        self.syn_tracker = {}        # Track SYN packets for SYN flood detection
+        self.port_scan_tracker = {}  # Track connection attempts for port scan detection
+        self.udp_flood_tracker = {}  # Track UDP packets for UDP flood detection
+        self.icmp_flood_tracker = {} # Track ICMP packets for ICMP flood detection
+        self.frag_tracker = {}       # Track fragmented packets for fragmentation attacks
+        self.arp_tracker = {}        # Track ARP packets for ARP spoofing detection
+        self.ttl_tracker = {}        # Track TTL values for TTL-based attacks
+        self.dns_tracker = {}        # Track DNS responses for amplification attacks
+        self.seq_tracker = {}        # Track TCP sequence numbers for TCP sequence prediction
+        self.http_tracker = {}       # Track HTTP requests for HTTP flood detection
+        self.rst_tracker = {}        # Track RST flags for RST flood detection
+        self.slow_tracker = {}       # Track slow connections for low-and-slow attack detection
+        self.dns_tunnel_tracker = {} # Track DNS queries for tunneling detection
+        self.vpn_proxy_tracker = {} # Track VPN/Proxy connections
+        self.websocket_tracker = {} # Track WebSocket connections for WebSocket flood detection
+        
+        # Attack thresholds and timeouts - optimized for accuracy and minimal missed detections
+        self.syn_flood_threshold = 10       # Number of SYNs before considering it a flood (was 50)
+        self.syn_flood_rate_threshold = 3   # SYN packets per second rate threshold for proactive detection
+        self.syn_flood_timeout = 60         # Time window for SYN flood detection (seconds) (was 5)
+        self.port_scan_threshold = 5        # Number of ports before considering it a scan (was 20)
+        self.port_scan_timeout = 60         # Time window for port scan detection (seconds) (was 10)
+        self.port_scan_pattern_weight = 2   # Multiplier for sequential port scanning patterns
+        self.udp_flood_threshold = 15       # Number of UDP packets before considering it a flood
+        self.udp_flood_timeout = 30         # Time window for UDP flood detection (seconds)
+        self.icmp_flood_threshold = 10      # Number of ICMP packets before considering it a flood
+        self.icmp_flood_timeout = 30        # Time window for ICMP flood detection (seconds)
+        self.frag_threshold = 8             # Number of fragmented packets from same source before alerting
+        self.frag_timeout = 30              # Time window for fragment attack detection (seconds)
+        self.arp_threshold = 3              # Number of ARP changes for same IP before considering it spoofing
+        self.arp_timeout = 120              # Time window for ARP spoofing detection (seconds)
+        self.ttl_anomaly_threshold = 5      # Number of packets with abnormal TTL before alerting
+        self.dns_amp_threshold = 12         # Number of large DNS responses before considering it amplification
+        self.dns_amp_size = 512             # Size in bytes to consider a DNS response potentially part of amplification
+        self.dns_amp_timeout = 30           # Time window for DNS amplification detection (seconds)
+        self.seq_pred_sample_size = 8       # Number of TCP packets to sample for sequence prediction analysis
+        self.seq_pred_timeout = 60          # Time window for TCP sequence prediction detection (seconds)
+        
+        # New attack thresholds - HTTP, RST, and slow attacks
+        self.http_flood_threshold = 30      # Number of HTTP requests before considering it a flood
+        self.http_flood_timeout = 10        # Time window for HTTP flood detection (seconds)
+        self.http_path_threshold = 5        # Number of different paths/endpoints to consider suspicious
+        self.rst_flood_threshold = 15       # Number of RST packets before considering it a flood
+        self.rst_flood_timeout = 5          # Time window for RST flood detection (seconds)
+        self.slow_conn_threshold = 6        # Number of slow connections before considering it an attack
+        self.slow_conn_timeout = 120        # Time window for slow connection detection (seconds)
+        self.slow_conn_duration = 30        # Duration in seconds that a connection must stay open to be considered slow
+        
+        # DNS tunneling detection configuration
+        self.dns_tunnel_enabled = True      # Whether DNS tunneling detection is enabled
+        self.dns_tunnel_threshold = 20      # Number of suspicious DNS queries before alerting
+        self.dns_subdomain_threshold = 5    # Max subdomain depth before considering suspicious
+        self.dns_length_threshold = 40      # Length of hostname part that's suspicious
+        self.dns_entropy_threshold = 3.5    # Shannon entropy threshold for random-looking domains
+        self.dns_tunnel_timeout = 60        # Time window for DNS tunnel detection (seconds)
+        
+        # VPN/Proxy detection configuration
+        self.vpn_proxy_enabled = True       # Whether VPN/Proxy detection is enabled
+        self.vpn_proxy_threshold = 5        # Number of suspicious connections before alerting
+        self.vpn_proxy_timeout = 300        # Time window for VPN/Proxy detection (seconds)
+        self.vpn_proxy_check_interval = 60  # How often to check cached IPs (seconds)
+        self.vpn_proxy_cache = {}           # Cache for VPN/Proxy results to limit API calls
+        self.vpn_proxy_cache_timeout = 3600 # How long to cache VPN/Proxy results (seconds)
+        
+        # WebSocket attack detection configuration
+        self.websocket_enabled = True        # Whether WebSocket attack detection is enabled
+        self.websocket_threshold = 30        # Number of WebSocket connections before considering it a flood
+        self.websocket_timeout = 60          # Time window for WebSocket flood detection (seconds)
+        self.http2_enabled = True            # Whether HTTP/2 attack detection is enabled
+        self.http2_threshold = 40            # Number of HTTP/2 frames before considering it a flood
+        self.http2_timeout = 60              # Time window for HTTP/2 flood detection (seconds)
+        
+        # Honeypot configuration
+        self.honeypot_enabled = False      # Whether honeypot detection is enabled
+        self.honeypot_ports = [22, 23, 445, 1433, 3306, 3389, 5900]  # Common attack targets
+        self.honeypot_tracker = {}         # Track connection attempts to honeypot ports
+        self.honeypot_threshold = 3        # Number of attempts before considering malicious
+        self.honeypot_detection_window = 60  # Time window for honeypot detection (seconds)
+        self.flood_alerting_interval = 60   # Minimum time between alerts (seconds)
+        self.last_alert_time = {}           # Track when alerts were last sent
+        
+        # Tracking locks for thread safety
+        self.syn_lock = Lock()              # Lock for SYN tracker
+        self.port_scan_lock = Lock()        # Lock for port scan tracker
+        self.udp_lock = Lock()              # Lock for UDP tracker
+        self.icmp_lock = Lock()             # Lock for ICMP tracker
+        self.frag_lock = Lock()             # Lock for fragmentation tracker
+        self.arp_lock = Lock()              # Lock for ARP tracker
+        self.ttl_lock = Lock()              # Lock for TTL tracker
+        self.dns_lock = Lock()              # Lock for DNS tracker
+        self.seq_lock = Lock()              # Lock for TCP sequence tracker
+        self.http_lock = Lock()             # Lock for HTTP tracker
+        self.rst_lock = Lock()              # Lock for RST tracker
+        self.slow_lock = Lock()             # Lock for slow connection tracker
+        self.honeypot_lock = Lock()         # Lock for honeypot tracker
+        self.dns_tunnel_lock = Lock()       # Lock for DNS tunneling tracker
+        self.vpn_proxy_lock = Lock()       # Lock for VPN/Proxy tracker
+        self.websocket_lock = Lock()      # Lock for WebSocket tracker
+        
         # Colorama initialization
         init(autoreset=True)
         
@@ -778,34 +881,48 @@ class OpenMammoth:
             
         return result
     
+    def calculate_entropy(self, data):
+        """Calculate Shannon entropy of a string - measure of randomness"""
+        if not data:
+            return 0
+        
+        # Count character frequencies
+        char_count = {}
+        for char in data:
+            if char in char_count:
+                char_count[char] += 1
+            else:
+                char_count[char] = 1
+        
+        # Calculate entropy
+        entropy = 0
+        for count in char_count.values():
+            probability = count / len(data)
+            entropy -= probability * math.log2(probability)
+        
+        return entropy
+        
     def is_suspicious_ip_pattern(self, ip):
-        """Check if the IP matches known suspicious patterns"""
+        """Check if the IP address matches suspicious patterns"""
         try:
-            if not isinstance(ip, str):
+            if not ip or not isinstance(ip, str):
                 return False
                 
-            # Parse the IP address
-            try:
-                ip_obj = ipaddress.ip_address(ip)
-            except ValueError:
-                # Not a valid IP address
+            # Check for private IPv4 ranges (not suspicious)
+            if self.is_private_ip(ip):
                 return False
-                
-            # Check if it's a private IP (shouldn't be suspicious)
-            if ip_obj.is_private:
-                return False
-                
-            # Check for suspicious patterns
             
-            # Pattern 1: IPs from known bad ranges
-            bad_ranges = [
-                '185.159.0.0/16',   # Example known botnet range
-                '194.67.71.0/24',    # Example known for malicious activity
-                '80.82.0.0/16'       # Example known for scanning
+            # Check for known patterns used in attacks
+            suspicious_patterns = [
+                r'^192\.168\.',  # Local IPs sometimes used in spoofing
+                r'^10\.',        # Local IPs sometimes used in spoofing
+                r'^172\.(1[6-9]|2[0-9]|3[0-1])\.',  # Local IPs sometimes used in spoofing
+                r'^169\.254\.',  # Link-local IPs sometimes abused
+                r'^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.',  # CGNAT space often abused
             ]
             
-            for bad_range in bad_ranges:
-                if ip_obj in ipaddress.ip_network(bad_range, strict=False):
+            for pattern in suspicious_patterns:
+                if re.match(pattern, ip):
                     return True
             
             # Pattern 2: Check for sequential IP octets which can indicate automated tools
@@ -2418,198 +2535,232 @@ class OpenMammoth:
                 
         return False
 
-    def cleanup_old_data(self):
-        """Clean up old tracking data to prevent memory leaks and reduce resource usage
-        New implementation to completely eliminate timestamp errors"""
-        try:
-            # Use nullcontext for optional lock handling
-            from contextlib import nullcontext
+    def safe_clean_dictionary(self, dictionary, timestamp_key, lock=None, cutoff=None, 
+                              max_size=5000, popitem_last=False):
+        """Safely clean a dictionary by removing old entries and limiting size
+        
+        Args:
+            dictionary: Dictionary to clean
+            timestamp_key: Key within dictionary entries that contains the timestamp value
+            lock: Optional lock to use for thread safety
+            cutoff: Timestamp cutoff value. If None, uses current time - 1 hour
+            max_size: Maximum size of dictionary
+            popitem_last: Whether to remove newest (True) or oldest (False) items when limiting size
+        """
+        # Use current time if cutoff not provided
+        if cutoff is None:
             current_time = time.time()
+            cutoff = current_time - 3600  # Default 1 hour cutoff
+            
+        if dictionary is None or not isinstance(dictionary, dict):
+            logging.debug("Skipping cleanup for non-dictionary object")
+            return
+            
+        # Get the proper lock if none provided
+        if lock is None:
+            if dictionary is self.connection_tracker:
+                lock = self.connection_lock
+            elif dictionary is self.packet_rates:
+                lock = self.packet_rates_lock
+            elif dictionary is getattr(self, 'tcp_flags_tracker', None):
+                lock = getattr(self, 'tcp_flags_lock', None) 
+            elif dictionary is getattr(self, 'fragment_tracker', None):
+                lock = getattr(self, 'fragment_lock', None)
+                
+        # Use nullcontext if no lock available
+        context_mgr = lock if lock is not None else nullcontext()
+        
+        try:
+            with context_mgr:
+                # First pass: remove invalid entries and expired entries
+                keys_to_remove = []
+                # Get all keys first to avoid modification during iteration
+                keys = list(dictionary.keys())
+                
+                for key in keys:
+                    if key is None:
+                        keys_to_remove.append(key)
+                        continue
+                        
+                    try:
+                        # Entry must exist and be a dictionary
+                        entry = dictionary.get(key)
+                        if entry is None or not isinstance(entry, dict):
+                            keys_to_remove.append(key)
+                            continue
+                            
+                        # Entry must have timestamp key
+                        if timestamp_key not in entry:
+                            logging.debug(f"Missing {timestamp_key} for {key} in dictionary, removing entry")
+                            keys_to_remove.append(key)
+                            continue
+                            
+                        # Timestamp must be a valid number
+                        timestamp = entry.get(timestamp_key)
+                        if timestamp is None or not isinstance(timestamp, (int, float)):
+                            logging.debug(f"Invalid timestamp for {key}: {timestamp}")
+                            keys_to_remove.append(key)
+                            continue
+                            
+                        # Check if entry is too old
+                        if timestamp < cutoff:
+                            # Special case for attack sources with blocked flag
+                            if dictionary is getattr(self, 'attack_sources', {}) and entry.get('blocked', False):
+                                if timestamp < (cutoff - 86400):  # 24 hours older than normal cutoff
+                                    keys_to_remove.append(key)
+                            else:
+                                keys_to_remove.append(key)
+                    except Exception as e:
+                        logging.debug(f"Error checking dictionary entry {key}: {str(e)}")
+                        keys_to_remove.append(key)
+                        
+                # Safe removal of invalid/expired entries
+                for key in keys_to_remove:
+                    try:
+                        dictionary.pop(key, None)
+                    except Exception as e:
+                        logging.debug(f"Error removing key {key}: {str(e)}")
+                        
+                # Second pass: limit dictionary size if still too large
+                if len(dictionary) > max_size:
+                    logging.debug(f"Dictionary size {len(dictionary)} exceeds limit {max_size}, trimming")
+                    try:
+                        # For timestamp-based dictionaries, we can sort by timestamp
+                        sorted_items = []
+                        for key, value in dictionary.items():
+                            try:
+                                if isinstance(value, dict) and timestamp_key in value:
+                                    timestamp = value[timestamp_key]
+                                    if isinstance(timestamp, (int, float)):
+                                        sorted_items.append((key, timestamp))
+                            except Exception:
+                                pass
+                                
+                        if sorted_items:
+                            # Sort by timestamp (oldest first)
+                            sorted_items.sort(key=lambda x: x[1])
+                            # Remove oldest entries until we're under the limit
+                            to_remove = len(dictionary) - max_size
+                            for i in range(min(to_remove, len(sorted_items))):
+                                try:
+                                    dictionary.pop(sorted_items[i][0], None)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logging.debug(f"Error during size limiting: {str(e)}")
+        except Exception as e:
+            logging.error(f"Error during dictionary cleanup: {str(e)}")
+    
+    def cleanup_old_data(self, current_time=None):
+        """Clean up old data from all tracking dictionaries using safe methods.
+        
+        Args:
+            current_time: Current timestamp, will use time.time() if None
+        """
+        if current_time is None:
+            current_time = time.time()
+            
+        # Update attack statistics before cleanup
+        try:
+            with self.stats_lock:
+                # Calculate active threats
+                active_threats = 0
+                
+                # Count active SYN flood attacks
+                for key, data in self.syn_tracker.items():
+                    if current_time - data['first_seen'] <= self.syn_flood_timeout and data['count'] >= self.syn_flood_threshold:
+                        active_threats += 1
+                
+                # Count active port scan attacks
+                for src_ip, data in self.port_scan_tracker.items():
+                    for dst_ip, ports in data['targets'].items():
+                        if len(ports) >= self.port_scan_threshold and current_time - data['first_seen'] <= self.port_scan_timeout:
+                            active_threats += 1
+                            break
+                
+                # Count active UDP flood attacks
+                for key, data in self.udp_flood_tracker.items():
+                    if current_time - data['first_seen'] <= self.udp_flood_timeout and data['count'] >= self.udp_flood_threshold:
+                        active_threats += 1
+                
+                # Count active ICMP flood attacks
+                for key, data in self.icmp_flood_tracker.items():
+                    if current_time - data['first_seen'] <= self.icmp_flood_timeout and data['count'] >= self.icmp_flood_threshold:
+                        active_threats += 1
+                
+                # Count active fragmentation attacks
+                for src_ip, data in self.frag_tracker.items():
+                    if current_time - data['first_seen'] <= self.frag_timeout and data['count'] >= self.frag_threshold:
+                        active_threats += 1
+                
+                # Update active threats count
+                self.stats['active_threats'] = active_threats
+                
+                # Update blocking statistics
+                if hasattr(self, 'blocked_ips'):
+                    self.stats['blocked_ips_count'] = len(self.blocked_ips)
+        except Exception as e:
+            logging.error(f"Error updating attack statistics: {str(e)}")
+            # Continue with cleanup even if stats update fails
+            
+        try:
+            logging.debug("Starting dictionary cleanup process")
+            
+            # Calculate cutoff times once
             cutoff_time = current_time - 3600  # Remove data older than 1 hour
             attack_cutoff = current_time - 14400  # 4 hours for attack sources
             max_entries = 5000  # Max entries for standard trackers
-            attack_max_entries = 10000  # More entries for attack history
-            
-            # Define helper function for safe dictionary cleanup with timestamp checking
-            def safe_clean_dictionary(dictionary, timestamp_key, lock=None, cutoff=cutoff_time, 
-                                      max_size=max_entries, popitem_last=False):
-                """Safely clean a dictionary by removing old entries and limiting size
-                
-                Args:
-                    dictionary: Dictionary to clean
-                    timestamp_key: Key within dictionary entries that contains the timestamp value
-                    lock: Optional lock to use for thread safety
-                    cutoff: Timestamp cutoff value
-                    max_size: Maximum size of dictionary
-                    popitem_last: Whether to remove newest (True) or oldest (False) items when limiting size
-                """
-                if dictionary is None or not isinstance(dictionary, dict):
-                    logging.debug("Skipping cleanup for non-dictionary object")
-                    return
-                    
-                # Get the proper lock if none provided
-                if lock is None:
-                    if dictionary is self.connection_tracker:
-                        lock = self.connection_lock
-                    elif dictionary is self.packet_rates:
-                        lock = self.packet_rates_lock
-                    elif dictionary is self.tcp_flags:
-                        lock = self.tcp_flags_lock
-                    elif dictionary is self.fragments:
-                        lock = self.fragment_lock
-                    else:
-                        lock = nullcontext()
-                        
-                context_mgr = lock if lock is not None else nullcontext()
-                try:
-                    with context_mgr:
-                        # First pass: remove invalid entries and expired entries
-                        keys_to_remove = []
-                        # Get all keys first to avoid modification during iteration
-                        keys = list(dictionary.keys())
-                        
-                        for key in keys:
-                            if key is None:
-                                keys_to_remove.append(key)
-                                continue
-                                
-                            try:
-                                # Entry must exist and be a dictionary
-                                entry = dictionary.get(key)
-                                if entry is None or not isinstance(entry, dict):
-                                    keys_to_remove.append(key)
-                                    continue
-                                    
-                                # Entry must have timestamp key
-                                if timestamp_key not in entry:
-                                    keys_to_remove.append(key)
-                                    continue
-                                    
-                                # Timestamp must be a valid number
-                                timestamp = entry.get(timestamp_key)
-                                if timestamp is None or not isinstance(timestamp, (int, float)):
-                                    keys_to_remove.append(key)
-                                    continue
-                                    
-                                # Check if entry is too old
-                                if timestamp < cutoff:
-                                    # Special case for attack sources with blocked flag
-                                    if dictionary is getattr(self, 'attack_sources', {}) and entry.get('blocked', False):
-                                        if timestamp < (cutoff_time - 86400):  # 24 hours older than normal cutoff
-                                            keys_to_remove.append(key)
-                                    else:
-                                        keys_to_remove.append(key)
-                            except Exception as e:
-                                logging.debug(f"Error checking dictionary entry {key}: {str(e)}")
-                                keys_to_remove.append(key)
-                                
-                        # Safe removal of invalid/expired entries
-                        for key in keys_to_remove:
-                            try:
-                                dictionary.pop(key, None)
-                            except Exception as e:
-                                logging.debug(f"Error removing key {key}: {str(e)}")
-                                
-                        # Second pass: limit dictionary size if still too large
-                        if len(dictionary) > max_size:
-                            logging.debug(f"Dictionary size {len(dictionary)} exceeds limit {max_size}, trimming")
-                            try:
-                                # For timestamp-based dictionaries, we can sort by timestamp
-                                sorted_items = []
-                                for key, value in dictionary.items():
-                                    try:
-                                        if isinstance(value, dict) and timestamp_key in value:
-                                            timestamp = value[timestamp_key]
-                                            if isinstance(timestamp, (int, float)):
-                                                sorted_items.append((key, timestamp))
-                                    except Exception:
-                                        pass
-                                        
-                                if sorted_items:
-                                    # Sort by timestamp (oldest first)
-                                    sorted_items.sort(key=lambda x: x[1])
-                                    # Remove oldest entries until we're under the limit
-                                    to_remove = len(dictionary) - max_size
-                                    for i in range(min(to_remove, len(sorted_items))):
-                                        try:
-                                            dictionary.pop(sorted_items[i][0], None)
-                                        except Exception:
-                                            pass
-                            except Exception as e:
-                                logging.debug(f"Error during size limiting: {str(e)}")
-                except Exception as e:
-                    logging.error(f"Error during dictionary cleanup: {str(e)}")
-            
-            # Use our helper function to clean all dictionaries in a consistent manner
+            attack_max_entries = 10000  # Max entries for attack history
             
             # 1. Clean up connection tracker
-            safe_clean_dictionary(self.connection_tracker, 'last_seen', 
-                                  self.connection_lock, cutoff_time, max_entries)
+            if hasattr(self, 'connection_tracker'):
+                self.safe_clean_dictionary(self.connection_tracker, 'last_seen', 
+                                       self.connection_lock, cutoff_time, max_entries)
             
             # 2. Clean up packet rates
-            safe_clean_dictionary(self.packet_rates, 'timestamp', 
-                                  self.packet_rates_lock, cutoff_time, max_entries)
-                                  
+            if hasattr(self, 'packet_rates'):
+                self.safe_clean_dictionary(self.packet_rates, 'timestamp', 
+                                       self.packet_rates_lock, cutoff_time, max_entries)
+                                   
             # 3. Clean up TCP flags
             if hasattr(self, 'tcp_flags_tracker'):
-                safe_clean_dictionary(self.tcp_flags_tracker, 'last_seen', 
-                                      self.tcp_flags_lock, cutoff_time, max_entries)
-                                  
+                self.safe_clean_dictionary(self.tcp_flags_tracker, 'last_seen', 
+                                       self.tcp_flags_lock, cutoff_time, max_entries)
+                                   
             # 4. Clean up various attack trackers with proper timestamp keys
             with self.stats_lock:  # Use stats lock for these trackers
                 # SYN flood tracker
                 if hasattr(self, 'syn_tracker'):
-                    safe_clean_dictionary(self.syn_tracker, 'timestamp', None, cutoff_time, max_entries)
+                    self.safe_clean_dictionary(self.syn_tracker, 'timestamp', None, cutoff_time, max_entries)
                 
                 # UDP flood tracker
                 if hasattr(self, 'udp_tracker'):
-                    safe_clean_dictionary(self.udp_tracker, 'timestamp', None, cutoff_time, max_entries)
+                    self.safe_clean_dictionary(self.udp_tracker, 'timestamp', None, cutoff_time, max_entries)
                 
                 # ICMP flood tracker
                 if hasattr(self, 'icmp_tracker'):
-                    safe_clean_dictionary(self.icmp_tracker, 'timestamp', None, cutoff_time, max_entries)
+                    self.safe_clean_dictionary(self.icmp_tracker, 'timestamp', None, cutoff_time, max_entries)
                 
                 # Port scan tracker
                 if hasattr(self, 'port_scan_tracker'):
-                    safe_clean_dictionary(self.port_scan_tracker, 'timestamp', None, cutoff_time, max_entries)
+                    self.safe_clean_dictionary(self.port_scan_tracker, 'timestamp', None, cutoff_time, max_entries)
             
             # 5. Clean up TCP-specific trackers with tcp_flags_lock
-            # Note: We've already handled tcp_flags_tracker earlier, but we'll also clean up seq_tracker here
-            # Using correct timestamp keys for each tracker
             if hasattr(self, 'seq_tracker'):
-                safe_clean_dictionary(self.seq_tracker, 'timestamp', self.tcp_flags_lock, cutoff_time, max_entries)
+                self.safe_clean_dictionary(self.seq_tracker, 'timestamp', self.tcp_flags_lock, cutoff_time, max_entries)
             
             # 6. Clean up fragment tracker with its own lock
             if hasattr(self, 'fragment_tracker'):
-                safe_clean_dictionary(self.fragment_tracker, 'timestamp', self.fragment_lock, cutoff_time, max_entries)
+                self.safe_clean_dictionary(self.fragment_tracker, 'timestamp', self.fragment_lock, cutoff_time, max_entries)
             
-            # Clean attack_sources to prevent unbounded growth
+            # 7. Special case: Clean attack_sources with longer retention
             if hasattr(self, 'attack_sources'):
-                # For attack sources, use a longer retention (4 hours) but also limit size
-                attack_cutoff = current_time - 14400  # 4 hours
-                attack_max_entries = 10000  # More entries for attack history
+                self.safe_clean_dictionary(self.attack_sources, 'last_attack', 
+                                       self.stats_lock, attack_cutoff, attack_max_entries)
                 
-                for ip in list(self.attack_sources.keys()):
-                    # First check if last_attack key exists
-                    if 'last_attack' not in self.attack_sources[ip]:
-                        logging.debug(f"Missing last_attack timestamp for attack_sources IP {ip}, leaving since it's a security-critical structure")
-                        continue
-                    
-                    # Then check if it's expired
-                    if self.attack_sources[ip]['last_attack'] < attack_cutoff:
-                        # If IP is blocked, don't remove it from history
-                        if not self.attack_sources[ip].get('blocked', False):
-                            del self.attack_sources[ip]
-                
-                # If still too large, remove oldest based on first_attack time
-                if len(self.attack_sources) > attack_max_entries:
-                    # Sort by first_attack time and keep only the newest entries
-                    sorted_entries = sorted(self.attack_sources.items(), 
-                                           key=lambda x: x[1].get('first_attack', 0))
-                    to_remove = sorted_entries[:len(sorted_entries) - attack_max_entries]
-                    for ip, _ in to_remove:
-                        if not self.attack_sources[ip].get('blocked', False):
-                            del self.attack_sources[ip]
+        except Exception as e:
+            logging.error(f"Error during cleanup_old_data: {str(e)}")
+            # Continue execution to avoid crashing the entire application
             
             # Log memory usage statistics periodically
             logging.info(f"Memory cleanup performed: {len(self.syn_tracker) if hasattr(self, 'syn_tracker') else 0} SYN entries, "
@@ -2655,6 +2806,1754 @@ class OpenMammoth:
                 return False
         return True
 
+    def packet_handler(self, packet):
+        """Process each captured packet
+        This is called by Scapy's sniff function for each packet captured"""
+        try:
+            # Increment the packet counter - fixes the total_packets always 0 issue
+            with self.stats_lock:
+                self.stats['total_packets'] += 1
+                
+                # Log every 1000 packets just to verify capture is working
+                if self.stats['total_packets'] % 1000 == 0:
+                    logging.info(f"Processed {self.stats['total_packets']} packets")
+            
+            # Even with advanced protection, only fully process a percentage of packets
+            # This drastically improves performance while still maintaining security
+            sample_rate = 0.1  # Process only 10% of packets in detail
+            
+            # Basic checks for all packets - very fast
+            if hasattr(packet, 'src') and packet.haslayer('IP'):
+                src_ip = packet.getlayer('IP').src
+                # Check if IP is in blacklist (fast check)
+                if src_ip in getattr(self, 'blacklist', []):
+                    with self.stats_lock:
+                        self.stats['blocked_packets'] += 1
+                    return  # Skip further processing for blocked IPs
+            
+            # Sample a percentage of packets for detailed analysis
+            if random.random() < sample_rate and hasattr(self, 'advanced_protection') and self.advanced_protection:
+                # Use minimal processing for most packets
+                if hasattr(self, 'packet_executor') and self.packet_executor:
+                    try:
+                        # Submit with low priority - don't block the queue
+                        self.packet_executor.submit(self._process_packet, packet) 
+                    except Exception:
+                        pass  # Silently continue if thread pool is full
+            
+        except Exception as e:
+            # Just log and continue to avoid blocking packet processing
+            logging.debug(f"Error in packet_handler: {str(e)}")
+            pass  # Never block the main packet capture thread
+    
+    def _process_packet_minimal(self, packet):
+        """Lightweight packet processing for better performance"""
+        try:
+            # Only do very basic checks for blacklisted IPs
+            if hasattr(packet, 'src') and packet.haslayer('IP'):
+                src_ip = packet.getlayer('IP').src
+                if src_ip in getattr(self, 'blacklist', []):
+                    with self.stats_lock:
+                        self.stats['blocked_packets'] += 1
+        except Exception as e:
+            # Just log and continue - don't stop processing
+            logging.debug(f"Error in minimal packet processing: {str(e)}")
+    
+    def start_protection(self):
+        if not self.interface:
+            logging.error("No interface specified for packet capture!")
+            return False
+            
+        # Check if interface exists before starting
+        if not self.check_interface_exists():
+            logging.error(f"Interface {self.interface} does not exist or is not up!")
+            return False
+            
+        # Initialize thread pool for parallel packet processing if not already done
+        if not hasattr(self, 'thread_pool'):
+            self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=self.worker_threads)
+            logging.info(f"Initialized thread pool with {self.worker_threads} workers")
+            
+        # Start Scapy sniffer in a separate thread so it doesn't block
+        self.stop_sniffing = False
+        self.sniffer_thread = threading.Thread(target=self._run_sniffer)
+        self.sniffer_thread.daemon = True
+        self.sniffer_thread.start()
+        
+        logging.info(f"Started protection on interface {self.interface}")
+        return True
+    def _run_sniffer(self):
+        """Run the packet sniffer in a separate thread"""
+        try:
+            # Optimized sniff parameters for performance
+            sniff(iface=self.interface, prn=self.packet_handler, store=0, 
+                  filter="ip", stop_filter=lambda p: self.stop_sniffing)
+        except Exception as e:
+            logging.error(f"Sniffer error: {str(e)}")
+
+    def check_interface_exists(self):
+        """Check if specified interface exists on the system"""
+        try:
+            if platform.system() == "Windows":
+                # Windows implementation
+                output = subprocess.check_output("ipconfig /all", shell=True).decode("utf-8")
+                return self.interface in output
+            else:
+                # Linux/Unix implementation
+                interfaces = get_if_list()
+                return self.interface in interfaces
+        except Exception as e:
+            logging.error(f"Error checking interface: {str(e)}")
+            return False
+
+    def stop_protection(self):
+        """Stop the packet sniffer"""
+        self.stop_sniffing = True
+        if hasattr(self, 'sniffer_thread') and self.sniffer_thread is not None:
+            self.sniffer_thread.join(timeout=2.0)
+            logging.info("Protection stopped")
+        return True
+
+    def block_ip(self, ip, reason):
+        """Block an IP address that has been detected as malicious"""
+        with self.blacklist_lock:
+            if ip not in self.blacklist:
+                self.blacklist.append(ip)
+                
+                # Log the blocking action
+                logging.warning(f"BLOCKED IP: {ip} - Reason: {reason}")
+                
+                # Track blocking statistics
+                with self.stats_lock:
+                    if 'ips_blocked' not in self.stats:
+                        self.stats['ips_blocked'] = 0
+                    self.stats['ips_blocked'] += 1
+                    
+    def __str__(self):
+        """Return string representation with statistics"""
+        result = [f"OpenMammoth v{self.VERSION}"]
+        
+        # Add basic stats
+        with self.stats_lock:
+            for key, value in self.stats.items():
+                result.append(f"{key}: {value}")
+                
+        return "\n".join(result)
+    def is_suspicious_ip_pattern(self, ip_address):
+        """Check if an IP matches suspicious patterns (e.g., known botnets)"""
+        try:
+            # Check if IP is in common botnet ranges
+            ip_obj = ipaddress.ip_address(ip_address)
+            
+            # Convert to int for faster comparison
+            ip_int = int(ip_obj)
+            
+            # Check against known bad IP ranges (example ranges)
+            suspicious_ranges = [
+                (ipaddress.ip_network('185.156.73.0/24'), 'DDoS botnet'),
+                (ipaddress.ip_network('5.188.86.0/24'), 'Scanning network'),
+                # Add more ranges as needed
+            ]
+            
+            for net, reason in suspicious_ranges:
+                if ip_obj in net:
+                    logging.warning(f"IP {ip_address} matched suspicious range {net} ({reason})")
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            logging.error(f"Error checking IP pattern: {str(e)}")
+            return False
+    def cleanup_old_data(self):
+        """Clean up old data in tracking dictionaries to prevent memory growth"""
+        current_time = time.time()
+        
+        try:
+            # Clean SYN tracker
+            with self.syn_lock:
+                self._clean_tracker(self.syn_tracker, self.syn_flood_timeout, current_time)
+                
+            # Clean UDP tracker
+            with self.udp_lock:
+                self._clean_tracker(self.udp_flood_tracker, self.udp_flood_timeout, current_time)
+                
+            # Clean port scan tracker
+            with self.port_scan_lock:
+                self._clean_tracker(self.port_scan_tracker, self.port_scan_timeout, current_time)
+            # Clean attack sources
+            keys_to_remove = []
+            current_time = time.time()
+            
+            with self.attack_sources_lock:
+                for ip, data in self.attack_sources.items():
+                    if current_time - data['timestamp'] > self.attack_timeout:
+                        keys_to_remove.append(ip)
+                
+                for ip in keys_to_remove:
+                    del self.attack_sources[ip]
+                    
+        except Exception as e:
+            logging.error(f"Error in cleanup_old_data: {str(e)}")
+            
+    def _clean_tracker(self, tracker, timeout, current_time):
+        """Helper method to clean old entries from trackers"""
+        keys_to_remove = []
+        
+        # Identify keys to remove
+        for key, data in tracker.items():
+            if 'first_seen' in data and current_time - data['first_seen'] > timeout:
+                keys_to_remove.append(key)
+                
+        # Remove the keys
+        for key in keys_to_remove:
+            del tracker[key]
+            
+    def _process_packet(self, packet):
+        """Process a packet for attack detection"""
+        try:
+            # Increment total packet count
+            with self.stats_lock:
+                if 'total_packets' not in self.stats:
+                    self.stats['total_packets'] = 0
+                self.stats['total_packets'] += 1
+                
+            # Get current timestamp
+            current_time = time.time()
+            
+            # Skip processing if it's a blacklisted IP
+            if self.is_blacklisted_ip(packet):
+                return
+                
+            # Check if IP is in a suspicious pattern range
+            if packet.haslayer('IP'):
+                src_ip = packet.getlayer('IP').src
+                if self.is_suspicious_ip_pattern(src_ip):
+                    self.block_ip(src_ip, "Matched suspicious IP pattern")
+                    return
+                    
+            # Perform advanced analysis if enabled
+            if self.protection_level >= 3 and random.random() > 0.1:
+                # Skip detailed analysis of 90% of packets in advanced mode for performance
+                return
+            
+            # ================ ICMP FLOOD DETECTION ================
+            if packet.haslayer('ICMP'):
+                icmp = packet.getlayer('ICMP')
+                ip = packet.getlayer('IP')
+                
+                # Extract source and destination information
+                src_ip = ip.src
+                dst_ip = ip.dst
+                
+                # Track ICMP packets for flood detection (per destination IP)
+                key = dst_ip
+                
+                with self.icmp_lock:
+                    # Create entry if it doesn't exist
+                    if key not in self.icmp_flood_tracker:
+                        self.icmp_flood_tracker[key] = {'count': 0, 'sources': {}, 'first_seen': current_time}
+                    
+                    # Increment counters
+                    self.icmp_flood_tracker[key]['count'] += 1
+                    
+                    # Track each unique source
+                    if src_ip not in self.icmp_flood_tracker[key]['sources']:
+                        self.icmp_flood_tracker[key]['sources'][src_ip] = 0
+                    self.icmp_flood_tracker[key]['sources'][src_ip] += 1
+                    
+                    # Check for ICMP flood conditions
+                    time_window = current_time - self.icmp_flood_tracker[key]['first_seen']
+                    if (time_window <= self.icmp_flood_timeout and 
+                            self.icmp_flood_tracker[key]['count'] >= self.icmp_flood_threshold):
+                        
+                        # Alert for ICMP flood (limit alert frequency)
+                        alert_key = f"icmpflood_{key}"
+                        if (alert_key not in self.last_alert_time or 
+                                current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                            
+                            # Log the detection
+                            source_count = len(self.icmp_flood_tracker[key]['sources'])
+                            logging.warning(
+                                f"ICMP FLOOD DETECTED: {self.icmp_flood_tracker[key]['count']} ICMP packets " +
+                                f"to {dst_ip} from {source_count} sources in {time_window:.2f}s")
+                            
+                            # Update last alert time
+                            self.last_alert_time[alert_key] = current_time
+                            
+                            # Increment detection statistics
+                            with self.stats_lock:
+                                if 'icmp_flood_detected' not in self.stats:
+                                    self.stats['icmp_flood_detected'] = 0
+                                self.stats['icmp_flood_detected'] += 1
+                            
+                            # For severe attacks, consider blocking top sources
+                            if self.icmp_flood_tracker[key]['count'] > self.icmp_flood_threshold * 2:
+                                # Find the top offending sources
+                                top_sources = sorted(
+                                    self.icmp_flood_tracker[key]['sources'].items(), 
+                                    key=lambda x: x[1], 
+                                    reverse=True
+                                )[:3]  # Top 3 sources
+                                
+                                # Block these sources
+                                for attack_src, count in top_sources:
+                                    logging.warning(f"Blocking {attack_src} for ICMP flood attack ({count} packets)")
+                                    self.block_ip(attack_src, "ICMP flood attack")
+                                    
+            # ================ TCP FLAGS MANIPULATION DETECTION ================
+            # This detects unusual TCP flag combinations that could indicate scanning or manipulation
+            if packet.haslayer('TCP'):
+                tcp = packet.getlayer('TCP')
+                ip = packet.getlayer('IP')
+                src_ip = ip.src
+                
+                # Detect unusual flag combinations (e.g., FIN-PSH-URG without ACK, known as XMAS scan)
+                if tcp.flags & 0x29 == 0x29 and not (tcp.flags & 0x10):  # FIN-PSH-URG without ACK
+                    logging.warning(f"XMAS scan detected from {src_ip}")
+                    self.block_ip(src_ip, "XMAS scan detected")
+                    
+                    # Increment detection statistics
+                    with self.stats_lock:
+                        if 'xmas_scan_detected' not in self.stats:
+                            self.stats['xmas_scan_detected'] = 0
+                        self.stats['xmas_scan_detected'] += 1
+                        
+                # Detect NULL scan (no flags set)
+                elif tcp.flags == 0:
+                    logging.warning(f"NULL scan detected from {src_ip}")
+                    self.block_ip(src_ip, "NULL scan detected")
+                    
+                    # Increment detection statistics
+                    with self.stats_lock:
+                        if 'null_scan_detected' not in self.stats:
+                            self.stats['null_scan_detected'] = 0
+                        self.stats['null_scan_detected'] += 1
+                        
+                # Detect FIN scan (only FIN flag set)
+                elif tcp.flags == 0x01:
+                    logging.warning(f"FIN scan detected from {src_ip}")
+                    self.block_ip(src_ip, "FIN scan detected")
+                    
+                    # Increment detection statistics
+                    with self.stats_lock:
+                        if 'fin_scan_detected' not in self.stats:
+                            self.stats['fin_scan_detected'] = 0
+                        self.stats['fin_scan_detected'] += 1
+            
+            # ================ IP FRAGMENTATION ATTACK DETECTION ================
+            # This detects potential IP fragmentation based DoS or evasion attacks
+            if packet.haslayer('IP'):
+                ip = packet.getlayer('IP')
+                src_ip = ip.src
+                
+                # Check if packet is fragmented
+                is_fragment = (ip.flags == 1) or (ip.frag > 0)  # MF flag or fragment offset > 0
+                
+                if is_fragment:
+                    with self.frag_lock:
+                        # Track fragmented packets per source IP
+                        if src_ip not in self.frag_tracker:
+                            self.frag_tracker[src_ip] = {'count': 0, 'first_seen': current_time}
+                        
+                        # Increment counter
+                        self.frag_tracker[src_ip]['count'] += 1
+                        
+                        # Check if we exceed threshold in specified time window
+                        time_window = current_time - self.frag_tracker[src_ip]['first_seen']
+                        if (time_window <= self.frag_timeout and 
+                                self.frag_tracker[src_ip]['count'] >= self.frag_threshold):
+                                
+                            # Alert for fragmentation attack (limit alert frequency)
+                            alert_key = f"frag_{src_ip}"
+                            if (alert_key not in self.last_alert_time or 
+                                    current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                
+                                # Log the detection
+                                logging.warning(
+                                    f"FRAGMENTATION ATTACK DETECTED: {self.frag_tracker[src_ip]['count']} " +
+                                    f"fragmented packets from {src_ip} in {time_window:.2f}s")
+                                
+                                # Update last alert time
+                                self.last_alert_time[alert_key] = current_time
+                                
+                                # Increment detection statistics
+                                with self.stats_lock:
+                                    if 'frag_attack_detected' not in self.stats:
+                                        self.stats['frag_attack_detected'] = 0
+                                    self.stats['frag_attack_detected'] += 1
+                                
+                                # Block for severe attacks
+                                if self.frag_tracker[src_ip]['count'] > self.frag_threshold * 2:
+                                    logging.warning(f"Blocking {src_ip} for fragmentation attack")
+                                    self.block_ip(src_ip, "Fragmentation attack")
+
+            # ================ ARP SPOOF DETECTION ================
+            # This detects ARP spoofing attacks by tracking MAC-IP mappings
+            if packet.haslayer('ARP'):
+                arp = packet.getlayer('ARP')
+                
+                # Only process ARP responses (is-at, who-has)
+                if arp.op == 2:  # is-at (ARP reply)
+                    ip_addr = arp.psrc  # Source IP
+                    mac_addr = arp.hwsrc  # Source MAC
+                    
+                    with self.arp_lock:
+                        # If we don't have this IP in our tracker yet
+                        if ip_addr not in self.arp_tracker:
+                            self.arp_tracker[ip_addr] = {
+                                'macs': {mac_addr: 1},
+                                'first_seen': current_time,
+                                'count': 1
+                            }
+                        else:
+                            # Increment counter for this IP
+                            self.arp_tracker[ip_addr]['count'] += 1
+                            
+                            # Check if this MAC is already associated with this IP
+                            if mac_addr in self.arp_tracker[ip_addr]['macs']:
+                                self.arp_tracker[ip_addr]['macs'][mac_addr] += 1
+                            else:
+                                # New MAC claiming to be this IP - potential spoofing
+                                self.arp_tracker[ip_addr]['macs'][mac_addr] = 1
+                                
+                                # If we've seen multiple MACs for this IP, that's suspicious
+                                if len(self.arp_tracker[ip_addr]['macs']) >= self.arp_threshold:
+                                    # Alert for ARP spoofing
+                                    alert_key = f"arp_{ip_addr}"
+                                    if (alert_key not in self.last_alert_time or 
+                                            current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                        
+                                        # Get all MACs for this IP
+                                        all_macs = list(self.arp_tracker[ip_addr]['macs'].keys())
+                                        mac_list_str = ", ".join(all_macs)
+                                        
+                                        # Log the detection
+                                        logging.warning(
+                                            f"ARP SPOOFING DETECTED: IP {ip_addr} claimed by {len(all_macs)} different MACs: {mac_list_str}")
+                                        
+                                        # Update last alert time
+                                        self.last_alert_time[alert_key] = current_time
+                                        
+                                        # Increment detection statistics
+                                        with self.stats_lock:
+                                            if 'arp_spoof_detected' not in self.stats:
+                                                self.stats['arp_spoof_detected'] = 0
+                                            self.stats['arp_spoof_detected'] += 1
+                                        
+                                        # We don't block here since the IP might be legitimate
+                                        # Instead, we alert the administrator about the suspicious activity
+                                        print(f"{Fore.RED}[ALERT] ARP SPOOFING: {ip_addr} claimed by multiple MAC addresses!{Style.RESET_ALL}")
+                                        
+            # ================ TTL ANOMALY DETECTION ================
+            # This detects unusual TTL values which could indicate spoofing or evasion
+            if packet.haslayer('IP'):
+                ip = packet.getlayer('IP')
+                src_ip = ip.src
+                ttl = ip.ttl
+                
+                with self.ttl_lock:
+                    # Track TTL values per source IP
+                    if src_ip not in self.ttl_tracker:
+                        self.ttl_tracker[src_ip] = {'ttls': set(), 'count': 0, 'first_seen': current_time}
+                    
+                    # Add this TTL to the set and increment counter
+                    self.ttl_tracker[src_ip]['ttls'].add(ttl)
+                    self.ttl_tracker[src_ip]['count'] += 1
+                    
+                    # If we've seen many packets and multiple different TTL values, this is suspicious
+                    if (self.ttl_tracker[src_ip]['count'] > self.ttl_anomaly_threshold and 
+                            len(self.ttl_tracker[src_ip]['ttls']) > 2):
+                        
+                        # Alert for TTL anomaly (limit alert frequency)
+                        alert_key = f"ttl_{src_ip}"
+                        if (alert_key not in self.last_alert_time or 
+                                current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                            
+                            # Log the detection
+                            ttl_values = ", ".join(str(t) for t in self.ttl_tracker[src_ip]['ttls'])
+                            logging.warning(
+                                f"TTL ANOMALY DETECTED: {src_ip} using multiple TTL values: {ttl_values} " +
+                                f"in {self.ttl_tracker[src_ip]['count']} packets")
+                            
+                            # Update last alert time
+                            self.last_alert_time[alert_key] = current_time
+                            
+                            # Increment detection statistics
+                            with self.stats_lock:
+                                if 'ttl_anomaly_detected' not in self.stats:
+                                    self.stats['ttl_anomaly_detected'] = 0
+                                self.stats['ttl_anomaly_detected'] += 1
+                            
+                            # Consider this highly suspicious - could be IP spoofing
+                            if len(self.ttl_tracker[src_ip]['ttls']) > 3:
+                                logging.warning(f"Blocking {src_ip} for suspicious TTL anomaly (possible spoofing)")
+                                self.block_ip(src_ip, "TTL anomaly (possible spoofing)")
+                                
+            # ================ DNS AMPLIFICATION DETECTION ================
+            # This detects potential DNS amplification attacks (large responses that could be used for reflection)
+            if packet.haslayer('DNS') and packet.haslayer('UDP'):
+                dns = packet.getlayer('DNS')
+                ip = packet.getlayer('IP')
+                udp = packet.getlayer('UDP')
+                
+                # We're interested in DNS responses (QR=1)
+                if dns.qr == 1:  # This is a response
+                    src_ip = ip.src
+                    dst_ip = ip.dst
+                    src_port = udp.sport
+                    dst_port = udp.dport
+                    packet_size = len(packet)
+                    
+                    # Track large DNS responses (potential amplification)
+                    if packet_size >= self.dns_amp_size:
+                        with self.dns_lock:
+                            # Key is the source of the large response
+                            key = f"{src_ip}:{src_port}"
+                            
+                            if key not in self.dns_tracker:
+                                self.dns_tracker[key] = {
+                                    'count': 0, 
+                                    'bytes': 0,
+                                    'first_seen': current_time,
+                                    'targets': {}
+                                }
+                            
+                            # Increment counters
+                            self.dns_tracker[key]['count'] += 1
+                            self.dns_tracker[key]['bytes'] += packet_size
+                            
+                            # Track targets
+                            if dst_ip not in self.dns_tracker[key]['targets']:
+                                self.dns_tracker[key]['targets'][dst_ip] = 0
+                            self.dns_tracker[key]['targets'][dst_ip] += 1
+                            
+                            # Check if this might be an amplification attack
+                            time_window = current_time - self.dns_tracker[key]['first_seen']
+                            if (time_window <= self.dns_amp_timeout and 
+                                    self.dns_tracker[key]['count'] >= self.dns_amp_threshold):
+                                
+                                # Check if we have a high amplification factor (many bytes)
+                                avg_response_size = self.dns_tracker[key]['bytes'] / self.dns_tracker[key]['count']
+                                
+                                # Alert for potential DNS amplification
+                                alert_key = f"dns_amp_{src_ip}"
+                                if (alert_key not in self.last_alert_time or 
+                                        current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                    
+                                    # Additional check: if multiple targets, more likely to be an attack
+                                    target_count = len(self.dns_tracker[key]['targets'])
+                                    
+                                    # Log the detection
+                                    logging.warning(
+                                        f"DNS AMPLIFICATION DETECTED: {self.dns_tracker[key]['count']} large responses " +
+                                        f"from {src_ip}:{src_port} totaling {self.dns_tracker[key]['bytes']/1024:.2f} KB " +
+                                        f"(avg {avg_response_size:.2f} bytes) to {target_count} targets in {time_window:.2f}s")
+                                    
+                                    # Update last alert time
+                                    self.last_alert_time[alert_key] = current_time
+                                    
+                                    # Increment detection statistics
+                                    with self.stats_lock:
+                                        if 'dns_amp_detected' not in self.stats:
+                                            self.stats['dns_amp_detected'] = 0
+                                        self.stats['dns_amp_detected'] += 1
+                                    
+                                    # If very severe (many targets and high byte count), consider blocking
+                                    if target_count > 3 and self.dns_tracker[key]['bytes'] > 1024*1024:  # >1MB
+                                        logging.warning(f"Blocking {src_ip} for DNS amplification attack")
+                                        self.block_ip(src_ip, "DNS amplification attack")
+                                        
+            # ================ TCP SEQUENCE PREDICTION DETECTION ================
+            # This detects potential TCP sequence prediction attacks by analyzing sequence patterns
+            if packet.haslayer('TCP') and packet.haslayer('IP'):
+                tcp = packet.getlayer('TCP')
+                ip = packet.getlayer('IP')
+                src_ip = ip.src
+                dst_ip = ip.dst
+                src_port = tcp.sport
+                dst_port = tcp.dport
+                seq_num = tcp.seq
+                
+                # Track sequence numbers for established connections
+                # We're primarily interested in established connections (both sides sending data)
+                if tcp.flags & 0x10:  # ACK flag is set (part of established connection)
+                    connection_id = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}"
+                    
+                    with self.seq_lock:
+                        # Initialize tracking for this connection if it doesn't exist yet
+                        if connection_id not in self.seq_tracker:
+                            self.seq_tracker[connection_id] = {
+                                'seq_nums': [],
+                                'first_seen': current_time,
+                                'deltas': [],
+                                'analyzed': False
+                            }
+                        
+                        # Add this sequence number to our samples
+                        self.seq_tracker[connection_id]['seq_nums'].append(seq_num)
+                        
+                        # Calculate deltas (differences between consecutive sequence numbers)
+                        if len(self.seq_tracker[connection_id]['seq_nums']) >= 2:
+                            idx = len(self.seq_tracker[connection_id]['seq_nums']) - 1
+                            delta = self.seq_tracker[connection_id]['seq_nums'][idx] - self.seq_tracker[connection_id]['seq_nums'][idx-1]
+                            # Handle sequence wraparound
+                            if delta < 0:
+                                delta += 2**32  # TCP sequence is 32 bit and wraps around
+                            self.seq_tracker[connection_id]['deltas'].append(delta)
+                        
+                        # After collecting enough samples, analyze for predictability
+                        if (len(self.seq_tracker[connection_id]['seq_nums']) >= self.seq_pred_sample_size and 
+                                not self.seq_tracker[connection_id]['analyzed']):
+                                
+                            self.seq_tracker[connection_id]['analyzed'] = True
+                            
+                            # Check for simple patterns
+                            deltas = self.seq_tracker[connection_id]['deltas']
+                            
+                            # Check for constant pattern (all deltas are the same)
+                            constant_pattern = all(d == deltas[0] for d in deltas)
+                            
+                            # Check for simple linear pattern (delta between deltas is constant)
+                            delta_diffs = []
+                            for i in range(1, len(deltas)):
+                                delta_diffs.append(deltas[i] - deltas[i-1])
+                            
+                            linear_pattern = False
+                            if len(delta_diffs) >= 2:
+                                linear_pattern = all(dd == delta_diffs[0] for dd in delta_diffs)
+                            
+                            # Alert if we detect potentially predictable sequence numbers
+                            if constant_pattern or linear_pattern:
+                                pattern_type = "constant" if constant_pattern else "linear"
+                                
+                                alert_key = f"seq_pred_{src_ip}"
+                                if (alert_key not in self.last_alert_time or 
+                                        current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                    
+                                    # Log the detection
+                                    logging.warning(
+                                        f"TCP SEQUENCE PREDICTION VULNERABILITY: {src_ip}:{src_port} has " +
+                                        f"potentially predictable TCP sequence numbers ({pattern_type} pattern)")
+                                    
+                                    # Update last alert time
+                                    self.last_alert_time[alert_key] = current_time
+                                    
+                                    # Increment detection statistics
+                                    with self.stats_lock:
+                                        if 'seq_pred_detected' not in self.stats:
+                                            self.stats['seq_pred_detected'] = 0
+                                        self.stats['seq_pred_detected'] += 1
+                                    
+                                    # We don't block here, but alert the administrator about the vulnerability
+                                    print(f"{Fore.YELLOW}[WARNING] TCP SEQUENCE PREDICTION: {src_ip}:{src_port} has " +
+                                          f"potentially predictable sequence numbers!{Style.RESET_ALL}")
+                                    print(f"  Detected {pattern_type} pattern in sequence numbers - connection hijacking risk!")
+                                    print(f"  Consider dropping this connection or implementing additional validation.")
+            
+            # ================ RST FLOOD DETECTION ================
+            # This detects RST flood attacks which attempt to terminate legitimate connections
+            if packet.haslayer('TCP') and packet.haslayer('IP'):
+                tcp = packet.getlayer('TCP')
+                ip = packet.getlayer('IP')
+                
+                # Check for RST flag
+                if tcp.flags & 0x04:  # RST flag is set
+                    src_ip = ip.src
+                    dst_ip = ip.dst
+                    dst_port = tcp.dport
+                    
+                    with self.rst_lock:
+                        # We'll track RSTs per source IP to each destination IP:port
+                        key = f"{src_ip}->{dst_ip}:{dst_port}"
+                        
+                        if key not in self.rst_tracker:
+                            self.rst_tracker[key] = {
+                                'count': 0,
+                                'first_seen': current_time
+                            }
+                        
+                        # Increment counter for this source->destination combination
+                        self.rst_tracker[key]['count'] += 1
+                        
+                        # Check if we're seeing a flood of RST packets
+                        time_window = current_time - self.rst_tracker[key]['first_seen']
+                        if (time_window <= self.rst_flood_timeout and
+                                self.rst_tracker[key]['count'] >= self.rst_flood_threshold):
+                            
+                            # Alert for RST flood (limit alert frequency)
+                            alert_key = f"rst_{src_ip}"
+                            if (alert_key not in self.last_alert_time or
+                                    current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                
+                                # Log the detection
+                                logging.warning(
+                                    f"RST FLOOD DETECTED: {self.rst_tracker[key]['count']} RST packets from {src_ip} " +
+                                    f"to {dst_ip}:{dst_port} in {time_window:.2f}s")
+                                
+                                # Update last alert time
+                                self.last_alert_time[alert_key] = current_time
+                                
+                                # Increment detection statistics
+                                with self.stats_lock:
+                                    if 'rst_flood_detected' not in self.stats:
+                                        self.stats['rst_flood_detected'] = 0
+                                    self.stats['rst_flood_detected'] += 1
+                                
+                                # Block for severe RST floods
+                                if self.rst_tracker[key]['count'] > self.rst_flood_threshold * 2:
+                                    logging.warning(f"Blocking {src_ip} for RST flood attack")
+                                    self.block_ip(src_ip, "RST flood attack")
+            
+            # ================ HTTP FLOOD DETECTION ================
+            # This detects HTTP floods (Layer 7 DDoS) by analyzing traffic patterns
+            # Parse HTTP if TCP is present and on common HTTP ports
+            if packet.haslayer('TCP') and packet.haslayer('IP'):
+                tcp = packet.getlayer('TCP')
+                ip = packet.getlayer('IP')
+                
+                # Check for common HTTP ports (80, 443, 8080, etc.)
+                is_http_port = tcp.dport in (80, 443, 8080, 8000, 8888, 8443)
+                
+                # Look for HTTP request signatures
+                # We can't always rely on having a Raw layer for HTTP, so we use indicators like
+                # common HTTP ports and certain payload patterns
+                payload = None
+                http_method = None
+                http_path = None
+                
+                if packet.haslayer('Raw'):
+                    payload = packet["Raw"].load
+                    try:
+                        # Try to decode as string - will fail if binary data
+                        payload_str = payload.decode('utf-8', errors='ignore')
+                        
+                        # Simple check for HTTP request methods
+                        http_methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE", "PATCH"]
+                        for method in http_methods:
+                            if payload_str.startswith(method + " /"):
+                                http_method = method
+                                # Extract the path between method and HTTP version
+                                path_match = re.search(method + r" ([^\s]+) HTTP/[0-9.]+", payload_str)
+                                if path_match:
+                                    http_path = path_match.group(1)
+                                break
+                    except:
+                        pass
+                
+                # If we identified this as an HTTP request
+                if is_http_port and http_method:
+                    src_ip = ip.src
+                    dst_ip = ip.dst
+                    dst_port = tcp.dport
+                    
+                    with self.http_lock:
+                        # We'll track HTTP requests per source IP to each destination IP:port
+                        key = f"{src_ip}->{dst_ip}:{dst_port}"
+                        
+                        if key not in self.http_tracker:
+                            self.http_tracker[key] = {
+                                'count': 0,
+                                'first_seen': current_time,
+                                'methods': {},  # Track HTTP methods used
+                                'paths': set(),  # Track unique paths requested
+                                'last_request': current_time
+                            }
+                        
+                        # Update HTTP tracker data
+                        self.http_tracker[key]['count'] += 1
+                        if http_method:
+                            if http_method not in self.http_tracker[key]['methods']:
+                                self.http_tracker[key]['methods'][http_method] = 0
+                            self.http_tracker[key]['methods'][http_method] += 1
+                        if http_path:
+                            self.http_tracker[key]['paths'].add(http_path)
+                        self.http_tracker[key]['last_request'] = current_time
+                        
+                        # Check for HTTP flood conditions
+                        time_window = current_time - self.http_tracker[key]['first_seen']
+                        if (time_window <= self.http_flood_timeout and 
+                                self.http_tracker[key]['count'] >= self.http_flood_threshold):
+                            
+                            # Additional suspicious indicators
+                            path_count = len(self.http_tracker[key]['paths'])
+                            rapid_requests = False
+                            avg_requests_per_sec = self.http_tracker[key]['count'] / max(time_window, 0.001)
+                            
+                            # Check if this is likely an HTTP flood
+                            # Various signatures: many requests in short time, automated request patterns
+                            is_flood = any([
+                                # High request rate alone
+                                avg_requests_per_sec > self.http_flood_threshold / 2,
+                                # Moderate request rate but many different paths (crawler/scanning)
+                                (avg_requests_per_sec > 1 and path_count > self.http_path_threshold),
+                                # Suspicious behavior: many requests to same path
+                                (self.http_tracker[key]['count'] > self.http_flood_threshold * 1.5 and path_count == 1)
+                            ])
+                            
+                            if is_flood:
+                                # Alert for HTTP flood (limit alert frequency)
+                                alert_key = f"http_{src_ip}"
+                                if (alert_key not in self.last_alert_time or 
+                                        current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                    
+                                    # Get method distribution
+                                    method_str = ", ".join([f"{m}: {c}" for m, c in 
+                                                         self.http_tracker[key]['methods'].items()])
+                                    
+                                    # Log the detection
+                                    logging.warning(
+                                        f"HTTP FLOOD DETECTED: {self.http_tracker[key]['count']} requests ({method_str}) " +
+                                        f"from {src_ip} to {dst_ip}:{dst_port} across {path_count} paths in {time_window:.2f}s " +
+                                        f"({avg_requests_per_sec:.1f} req/sec)")
+                                    
+                                    # Update last alert time
+                                    self.last_alert_time[alert_key] = current_time
+                                    
+                                    # Increment detection statistics
+                                    with self.stats_lock:
+                                        if 'http_flood_detected' not in self.stats:
+                                            self.stats['http_flood_detected'] = 0
+                                        self.stats['http_flood_detected'] += 1
+                                    
+                                    # Block for severe HTTP floods
+                                    if avg_requests_per_sec > self.http_flood_threshold:
+                                        logging.warning(f"Blocking {src_ip} for HTTP flood attack")
+                                        self.block_ip(src_ip, "HTTP flood attack")
+                                        
+            # ================ SLOW ATTACK DETECTION ================
+            # This detects slow application layer attacks like Slowloris
+            # These attacks keep connections open for long periods with minimal data transfer
+            if packet.haslayer('TCP') and packet.haslayer('IP'):
+                tcp = packet.getlayer('TCP')
+                ip = packet.getlayer('IP')
+                
+                # We're interested in established connections (both ACK and SYN flags)
+                if tcp.flags & 0x12 == 0x12:  # Both SYN and ACK flags set (connection establishing)
+                    src_ip = ip.src
+                    dst_ip = ip.dst
+                    dst_port = tcp.dport
+                    src_port = tcp.sport
+                    
+                    # Create connection identifier for both directions
+                    conn_id = f"{src_ip}:{src_port}<->{dst_ip}:{dst_port}"
+                    
+                    with self.slow_lock:
+                        # Track connection start time
+                        if conn_id not in self.slow_tracker:
+                            self.slow_tracker[conn_id] = {
+                                'start_time': current_time,
+                                'last_activity': current_time,
+                                'bytes_transferred': 0,
+                                'packets': 0,
+                                'source_ip': src_ip
+                            }
+                        
+                        # Update connection tracker
+                        self.slow_tracker[conn_id]['last_activity'] = current_time
+                        self.slow_tracker[conn_id]['packets'] += 1
+                        
+                        # Add size of payload if present
+                        if packet.haslayer('Raw'):
+                            self.slow_tracker[conn_id]['bytes_transferred'] += len(packet['Raw'].load)
+                        else:
+                            # Count at least TCP header size
+                            self.slow_tracker[conn_id]['bytes_transferred'] += len(packet[TCP])
+                            
+                # Look for packets in connections that stay open but transfer minimal data
+                # This is key for detecting slow attacks - lots of tiny packets keeping connections open
+                if tcp.flags & 0x10:  # ACK flag set (established connection)
+                    src_ip = ip.src
+                    dst_ip = ip.dst
+                    src_port = tcp.sport
+                    dst_port = tcp.dport
+                    
+                    # Check both connection directions
+                    conn_id1 = f"{src_ip}:{src_port}<->{dst_ip}:{dst_port}"
+                    conn_id2 = f"{dst_ip}:{dst_port}<->{src_ip}:{src_port}"
+                    
+                    conn_id = None
+                    if conn_id1 in self.slow_tracker:
+                        conn_id = conn_id1
+                    elif conn_id2 in self.slow_tracker:
+                        conn_id = conn_id2
+                    
+                    if conn_id:
+                        with self.slow_lock:
+                            # Update connection tracker
+                            self.slow_tracker[conn_id]['last_activity'] = current_time
+                            self.slow_tracker[conn_id]['packets'] += 1
+                            
+                            # Add size of payload if present
+                            if packet.haslayer('Raw'):
+                                self.slow_tracker[conn_id]['bytes_transferred'] += len(packet['Raw'].load)
+                            else:
+                                # Count at least TCP header size
+                                self.slow_tracker[conn_id]['bytes_transferred'] += len(packet[TCP])
+                            
+                            # Check for slow attack indicators
+                            connection_age = current_time - self.slow_tracker[conn_id]['start_time']
+                            bytes_per_second = self.slow_tracker[conn_id]['bytes_transferred'] / max(connection_age, 0.001)
+                            source_ip = self.slow_tracker[conn_id]['source_ip']
+                            
+                            # Count slow connections per source IP
+                            slow_connections_from_ip = 0
+                            for cid, data in self.slow_tracker.items():
+                                if (data['source_ip'] == source_ip and
+                                        current_time - data['start_time'] >= self.slow_conn_duration and
+                                        data['bytes_transferred'] / max(current_time - data['start_time'], 0.001) < 50):
+                                    slow_connections_from_ip += 1
+                            
+                            # Detect slow connection patterns
+                            if (connection_age >= self.slow_conn_duration and
+                                    bytes_per_second < 50 and  # Very low data rate
+                                    slow_connections_from_ip >= self.slow_conn_threshold):
+                                
+                                # Alert for slow attack (limit alert frequency)
+                                alert_key = f"slow_{source_ip}"
+                                if (alert_key not in self.last_alert_time or
+                                        current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                    
+                                    # Log the detection
+                                    logging.warning(
+                                        f"SLOW ATTACK DETECTED: {source_ip} has {slow_connections_from_ip} slow connections " +
+                                        f"(avg {bytes_per_second:.1f} B/s) open for {connection_age:.1f}s")
+                                    
+                                    # Update last alert time
+                                    self.last_alert_time[alert_key] = current_time
+                                    
+                                    # Increment detection statistics
+                                    with self.stats_lock:
+                                        if 'slow_attack_detected' not in self.stats:
+                                            self.stats['slow_attack_detected'] = 0
+                                        self.stats['slow_attack_detected'] += 1
+                                    
+                                    # Block for severe slow attacks
+                                    if slow_connections_from_ip > self.slow_conn_threshold * 2:
+                                        logging.warning(f"Blocking {source_ip} for slow attack (possible Slowloris)")
+                                        self.block_ip(source_ip, "Slow attack (possible Slowloris)")
+                                        
+            # ================ HONEYPOT DETECTION ================
+            # This detects attackers probing for vulnerable services using decoy ports
+            if self.honeypot_enabled and packet.haslayer('TCP') and packet.haslayer('IP'):
+                tcp = packet.getlayer('TCP')
+                ip = packet.getlayer('IP')
+                
+                # Check if the packet is targeting one of our honeypot ports
+                if tcp.dport in self.honeypot_ports:
+                    src_ip = ip.src
+                    dst_port = tcp.dport
+                    
+                    # Skip if the source is in our whitelist
+                    if src_ip in self.whitelist:
+                        return
+                        
+                    with self.honeypot_lock:
+                        # Initialize tracker for this source if not exists
+                        if src_ip not in self.honeypot_tracker:
+                            self.honeypot_tracker[src_ip] = {
+                                'first_seen': current_time,
+                                'attempts': {},
+                                'total_attempts': 0
+                            }
+                        
+                        # Update port attempt counter
+                        if dst_port not in self.honeypot_tracker[src_ip]['attempts']:
+                            self.honeypot_tracker[src_ip]['attempts'][dst_port] = 0
+                            
+                        self.honeypot_tracker[src_ip]['attempts'][dst_port] += 1
+                        self.honeypot_tracker[src_ip]['total_attempts'] += 1
+                        
+                        # Check detection conditions
+                        time_window = current_time - self.honeypot_tracker[src_ip]['first_seen']
+                        unique_ports = len(self.honeypot_tracker[src_ip]['attempts'])
+                        total_attempts = self.honeypot_tracker[src_ip]['total_attempts']
+                        
+                        # Alert conditions: multiple honeypot ports probed or repeated attempts
+                        is_malicious = False
+                        reason = ""
+                        
+                        if time_window <= self.honeypot_detection_window:
+                            # Multiple honeypot ports probed
+                            if unique_ports >= self.honeypot_threshold:
+                                is_malicious = True
+                                reason = f"probed {unique_ports} honeypot ports"
+                            # Repeated attempts on same port
+                            elif any(attempts >= self.honeypot_threshold for port, attempts in 
+                                    self.honeypot_tracker[src_ip]['attempts'].items()):
+                                is_malicious = True
+                                reason = "repeated attempts on honeypot port"
+                                
+                        if is_malicious:
+                            # Alert for honeypot detection (limit alert frequency)
+                            alert_key = f"honeypot_{src_ip}"
+                            if (alert_key not in self.last_alert_time or
+                                    current_time - self.last_alert_time[alert_key] > self.flood_alerting_interval):
+                                
+                                # Format the ports and attempt counts for logging
+                                port_attempts = [
+                                    f"{port}: {count}" 
+                                    for port, count in self.honeypot_tracker[src_ip]['attempts'].items()
+                                ]
+                                
+                                # Log the detection
+                                logging.warning(
+                                    f"HONEYPOT DETECTION: {src_ip} {reason} in {time_window:.1f}s " +
+                                    f"(ports: {', '.join(port_attempts)})")
+                                
+                                # Update last alert time
+                                self.last_alert_time[alert_key] = current_time
+                                
+                                # Increment detection statistics
+                                with self.stats_lock:
+                                    if 'honeypot_detected' not in self.stats:
+                                        self.stats['honeypot_detected'] = 0
+                                    self.stats['honeypot_detected'] += 1
+                                
+                                # Block for serious honeypot probes
+                                    if total_attempts > self.honeypot_threshold * 2 or unique_ports > self.honeypot_threshold:
+                                        logging.warning(f"Blocking {src_ip} for honeypot probe activity")
+                                        self.block_ip(src_ip, "Honeypot probe detection")
+                                        
+            # ================ DNS TUNNELING DETECTION ================
+            # This detects DNS tunneling attempts which are often used for data exfiltration
+            # or as covert command and control channels
+            if self.dns_tunnel_enabled and packet.haslayer('DNS') and packet.haslayer('IP'):
+                dns = packet.getlayer('DNS')
+                ip = packet.getlayer('IP')
+                
+                # We're primarily interested in DNS queries (not responses)
+                if dns.qr == 0:  # DNS query
+                    src_ip = ip.src
+                    
+                    # Skip if the source is in our whitelist
+                    if src_ip in self.whitelist:
+                        return
+                    
+                    # Extract the query name
+                    if dns.qd and dns.qd.qname:
+                        try:
+                            # Convert DNS qname from bytes to string and remove trailing dot
+                            query = dns.qd.qname.decode('utf-8', errors='ignore').rstrip('.')
+                            
+                            # Skip common legitimate queries and local queries
+                            skip_domains = ['local', 'arpa', 'localdomain', 'localhost', 'home', 'lan']
+                            if any(query.endswith(d) for d in skip_domains):
+                                return
+                            
+                            # Calculate suspicious indicators
+                            with self.dns_tunnel_lock:
+                                # Initialize tracking for this source IP
+                                if src_ip not in self.dns_tunnel_tracker:
+                                    self.dns_tunnel_tracker[src_ip] = {
+                                        'first_seen': current_time,
+                                        'queries': [],
+                                        'total_queries': 0,
+                                        'last_alert': 0
+                                    }
+                                
+                                # Store query with timestamp
+                                self.dns_tunnel_tracker[src_ip]['queries'].append((current_time, query))
+                                self.dns_tunnel_tracker[src_ip]['total_queries'] += 1
+                                
+                                # Prune old queries outside our detection window
+                                self.dns_tunnel_tracker[src_ip]['queries'] = [
+                                    (ts, q) for ts, q in self.dns_tunnel_tracker[src_ip]['queries']
+                                    if current_time - ts <= self.dns_tunnel_timeout
+                                ]
+                                
+                                # Extract current queries in our time window
+                                queries_in_window = self.dns_tunnel_tracker[src_ip]['queries']
+                                
+                                # Calculate suspicious metrics only if we have enough queries
+                                if len(queries_in_window) >= 5:
+                                    # Check subdomain depth
+                                    subdomain_counts = []
+                                    # Check query length
+                                    long_queries = []
+                                    # Check entropy (randomness) of hostnames
+                                    high_entropy_queries = []
+                                    
+                                    for _, q in queries_in_window:
+                                        # Count subdomains
+                                        parts = q.split('.')
+                                        subdomain_count = len(parts) - 2  # -2 for TLD and domain
+                                        subdomain_counts.append(subdomain_count)
+                                        
+                                        # Check for unusually long hostnames
+                                        if any(len(part) > self.dns_length_threshold for part in parts):
+                                            long_queries.append(q)
+                                        
+                                        # Calculate entropy for the first subdomain part
+                                        # High entropy suggests randomized/encoded data
+                                        if len(parts) > 0 and len(parts[0]) > 8:  # Skip short names
+                                            hostname = parts[0]
+                                            entropy = self.calculate_entropy(hostname)
+                                            if entropy > self.dns_entropy_threshold:
+                                                high_entropy_queries.append((q, entropy))
+                                    
+                                    # Detection logic - consider multiple indicators
+                                    is_suspicious = False
+                                    reason = ""
+                                    
+                                    # Suspicious if consistently deep subdomains
+                                    if len([c for c in subdomain_counts if c >= self.dns_subdomain_threshold]) >= 3:
+                                        is_suspicious = True
+                                        reason = "excessive subdomain depth"
+                                    
+                                    # Suspicious if consistently long hostnames (encoded data)
+                                    elif len(long_queries) >= 3:
+                                        is_suspicious = True
+                                        reason = "unusually long query names"
+                                    
+                                    # Suspicious if high entropy hostnames (suggesting encoded data)
+                                    elif len(high_entropy_queries) >= 3:
+                                        is_suspicious = True
+                                        reason = "high entropy (randomness) in queries"
+                                    
+                                    # Suspicious if very high query rate
+                                    query_rate = len(queries_in_window) / self.dns_tunnel_timeout
+                                    if query_rate > 1.0:  # More than 1 per second average
+                                        is_suspicious = True
+                                        reason = f"high query rate ({query_rate:.1f}/sec)"
+                                    
+                                    # Alert if suspicious (limit alert frequency)
+                                    if is_suspicious:
+                                        # Don't alert more than once per minute for the same source
+                                        if current_time - self.dns_tunnel_tracker[src_ip]['last_alert'] > 60:
+                                            # Format recent queries for logging
+                                            recent_queries = [q for _, q in queries_in_window[-5:]]
+                                            
+                                            # Log the detection
+                                            logging.warning(
+                                                f"DNS TUNNELING SUSPECTED from {src_ip}: {reason}, " +
+                                                f"{len(queries_in_window)} queries in {self.dns_tunnel_timeout}s. " +
+                                                f"Recent examples: {', '.join(recent_queries)}")
+                                            
+                                            # If additional indicators of tunneling are present, block
+                                            severity = 0
+                                            if len([c for c in subdomain_counts if c >= self.dns_subdomain_threshold]) >= 5:
+                                                severity += 1
+                                            if len(long_queries) >= 5:
+                                                severity += 1
+                                            if len(high_entropy_queries) >= 5:
+                                                severity += 1
+                                            if query_rate > 2.0:  # Very high rate
+                                                severity += 1
+                                                
+                                            # Update last alert time
+                                            self.dns_tunnel_tracker[src_ip]['last_alert'] = current_time
+                                            
+                                            # Increment detection statistics
+                                            with self.stats_lock:
+                                                if 'dns_tunnel_detected' not in self.stats:
+                                                    self.stats['dns_tunnel_detected'] = 0
+                                                self.stats['dns_tunnel_detected'] += 1
+                                            
+                                            # Block for definite DNS tunneling activity
+                                            if severity >= 2:
+                                                logging.warning(f"Blocking {src_ip} for DNS tunneling activity")
+                                                self.block_ip(src_ip, "DNS tunneling")
+                        except Exception as e:
+                            logging.debug(f"Error analyzing DNS query: {str(e)}")
+                            pass
+                            
+            # ================ VPN/PROXY DETECTION ================
+            # This detects connections from known VPN/proxy providers which may be used to hide attacks
+            if self.vpn_proxy_enabled and packet.haslayer('IP'):
+                ip = packet.getlayer('IP')
+                src_ip = ip.src
+                
+                # Skip if the source is in our whitelist
+                if src_ip in self.whitelist:
+                    return
+                    
+                # Skip local/private IPs
+                if self.is_private_ip(src_ip):
+                    return
+                    
+                try:
+                    with self.vpn_proxy_lock:
+                        current_time = time.time()
+                        
+                        # Initialize tracking for this IP if not exists
+                        if src_ip not in self.vpn_proxy_tracker:
+                            self.vpn_proxy_tracker[src_ip] = {
+                                'first_seen': current_time,
+                                'last_seen': current_time,
+                                'connection_count': 0,
+                                'is_vpn': False,
+                                'is_proxy': False,
+                                'check_time': 0,
+                                'country': None,
+                                'last_alert': 0
+                            }
+                        
+                        # Update tracking
+                        tracker = self.vpn_proxy_tracker[src_ip]
+                        tracker['last_seen'] = current_time
+                        tracker['connection_count'] += 1
+                        
+                        # Only check if we haven't checked recently (to avoid API rate limits)
+                        if current_time - tracker['check_time'] > self.vpn_proxy_check_interval:
+                            # First check cache
+                            if src_ip in self.vpn_proxy_cache:
+                                cache_time, is_vpn, is_proxy, country = self.vpn_proxy_cache[src_ip]
+                                
+                                # Use cached result if still valid
+                                if current_time - cache_time < self.vpn_proxy_cache_timeout:
+                                    tracker['is_vpn'] = is_vpn
+                                    tracker['is_proxy'] = is_proxy
+                                    tracker['country'] = country
+                                    tracker['check_time'] = current_time
+                                else:
+                                    # Cache expired, remove it
+                                    del self.vpn_proxy_cache[src_ip]
+                            
+                            # If not in cache or expired, check with ipapi
+                            if src_ip not in self.vpn_proxy_cache:
+                                try:
+                                    # Query ipapi for this IP
+                                    data = ipapi.location(ip=src_ip, output='json')
+                                    
+                                    if data and isinstance(data, dict):
+                                        # Extract VPN/proxy information
+                                        is_vpn = data.get('security', {}).get('is_vpn', False)
+                                        is_proxy = data.get('security', {}).get('is_proxy', False)
+                                        country = data.get('country_name')
+                                        
+                                        # Update tracker
+                                        tracker['is_vpn'] = is_vpn
+                                        tracker['is_proxy'] = is_proxy
+                                        tracker['country'] = country
+                                        tracker['check_time'] = current_time
+                                        
+                                        # Cache the result
+                                        self.vpn_proxy_cache[src_ip] = (current_time, is_vpn, is_proxy, country)
+                                except Exception as e:
+                                    logging.debug(f"Error querying ipapi for {src_ip}: {str(e)}")
+                        
+                        # Detection logic
+                        if (tracker['is_vpn'] or tracker['is_proxy']) and tracker['connection_count'] >= self.vpn_proxy_threshold:
+                            # Don't alert more than once every 5 minutes for the same IP
+                            if current_time - tracker['last_alert'] > 300:
+                                vpn_type = "VPN" if tracker['is_vpn'] else "proxy"
+                                country_info = f" from {tracker['country']}" if tracker['country'] else ""
+                                
+                                logging.warning(
+                                    f"Suspicious {vpn_type} connection detected from {src_ip}{country_info} - "
+                                    f"{tracker['connection_count']} connections"
+                                )
+                                
+                                # Increment stats
+                                with self.stats_lock:
+                                    if 'vpn_proxy_detected' not in self.stats:
+                                        self.stats['vpn_proxy_detected'] = 0
+                                    self.stats['vpn_proxy_detected'] += 1
+                                
+                                # Update last alert time
+                                tracker['last_alert'] = current_time
+                                
+                                # Block if high volume of connections
+                                if tracker['connection_count'] >= self.vpn_proxy_threshold * 3:
+                                    logging.warning(f"Blocking {src_ip} for high volume {vpn_type} traffic")
+                                    self.block_ip(src_ip, f"High volume {vpn_type} traffic")
+                except Exception as e:
+                    logging.error(f"Error in VPN/proxy detection: {str(e)}")
+                    pass
+                    
+            # ================ WEBSOCKET & HTTP/2 ATTACK DETECTION ================
+            # This detects WebSocket & HTTP/2 flooding attacks which are increasingly common
+            # as they bypass traditional rate limiters and WAFs
+            if (self.websocket_enabled or self.http2_enabled) and packet.haslayer('TCP') and packet.haslayer('IP'):
+                ip = packet.getlayer('IP')
+                tcp = packet.getlayer('TCP')
+                src_ip = ip.src
+                dst_port = tcp.dport
+                payload = None
+                
+                # Skip if the source is in our whitelist
+                if src_ip in self.whitelist:
+                    return
+                    
+                # Check for WebSocket and HTTP/2 traffic (usually on 80, 443, 8080, etc.)
+                if self.websocket_enabled and tcp.payload and dst_port in [80, 443, 8080, 8443]:
+                    try:
+                        # Try to extract and inspect the payload
+                        if hasattr(tcp, 'load'):
+                            payload = tcp.load
+                        elif hasattr(tcp, 'payload') and hasattr(tcp.payload, 'load'):
+                            payload = tcp.payload.load
+                            
+                        if payload and isinstance(payload, bytes):
+                            payload_str = payload.decode('utf-8', errors='ignore')
+                            
+                            # Look for WebSocket signatures
+                            is_websocket = False
+                            if 'Upgrade: websocket' in payload_str or 'Sec-WebSocket-Key:' in payload_str:
+                                is_websocket = True  # WebSocket handshake
+                            elif payload_str and len(payload) > 2:  # Check actual WebSocket frames
+                                # Simple heuristic: WebSocket frames often start with bytes in range 0x80-0x8F
+                                frame_byte = payload[0] if isinstance(payload[0], int) else ord(payload[0])
+                                if 0x80 <= frame_byte <= 0x8F:
+                                    is_websocket = True
+                                    
+                            if is_websocket:
+                                current_time = time.time()
+                                with self.websocket_lock:  # Reusing same lock for related protocols
+                                    # Initialize tracking for this IP if not exists
+                                    if src_ip not in self.websocket_tracker:
+                                        self.websocket_tracker[src_ip] = {
+                                            'first_seen': current_time,
+                                            'last_seen': current_time,
+                                            'websocket_count': 0,
+                                            'http2_count': 0,
+                                            'last_alert': 0,
+                                            'websocket_rate': [],  # Track WebSocket frame arrival times
+                                            'http2_rate': [],  # Track HTTP/2 frame arrival times
+                                            'websocket_endpoints': set(),  # Track WebSocket endpoints being targeted
+                                            'http2_endpoints': set()  # Track HTTP/2 endpoints being targeted
+                                        }
+                                    
+                                    # Update tracking
+                                    tracker = self.websocket_tracker[src_ip]
+                                    tracker['last_seen'] = current_time
+                                    tracker['websocket_count'] += 1
+                                    
+                                    # Track WebSocket rate with sliding window
+                                    tracker['websocket_rate'].append(current_time)
+                                    if len(tracker['websocket_rate']) > 10:
+                                        tracker['websocket_rate'] = tracker['websocket_rate'][-10:]
+                                    
+                                    # Extract WebSocket target info if possible (simplified)
+                                    ws_path = "unknown"
+                                    if b'Sec-WebSocket-Protocol:' in payload:
+                                        try:
+                                            path_start = payload.find(b'Sec-WebSocket-Protocol:') + 23
+                                            path_end = payload.find(b'\r\n', path_start)
+                                            if path_end > path_start:
+                                                ws_path = payload[path_start:path_end].decode('utf-8', errors='ignore').strip()
+                                                tracker['websocket_endpoints'].add(ws_path)
+                                        except Exception:
+                                            pass
+                                    
+                                    # Also try to extract the target URI 
+                                    if b'GET ' in payload and b' HTTP/' in payload:
+                                        try:
+                                            uri_start = payload.find(b'GET ') + 4
+                                            uri_end = payload.find(b' HTTP/', uri_start)
+                                            if uri_end > uri_start:
+                                                uri = payload[uri_start:uri_end].decode('utf-8', errors='ignore').strip()
+                                                tracker['websocket_endpoints'].add(uri)
+                                        except Exception:
+                                            pass
+                                            
+                                    # Check for WebSocket flooding attacks
+                                    detection_window = 5  # 5 seconds
+                                    rate_threshold = 50   # 50 frames within detection window is suspicious
+                                    current_rate = sum(1 for t in tracker['websocket_rate'] if current_time - t <= detection_window)
+                                    
+                                    if (current_rate >= rate_threshold and 
+                                            tracker['websocket_count'] > 100 and 
+                                            current_time - tracker.get('last_alert', 0) > 60):  # Alert at most once per minute
+                                        
+                                        # Potential WebSocket flood attack detected
+                                        alert_msg = f"Potential WebSocket flood attack from {src_ip}: {current_rate} frames in {detection_window}s"
+                                        self.alert(alert_msg, src_ip, 'websocket_flood', severity=3)
+                                        tracker['last_alert'] = current_time
+                                        
+                                        if self.protection_level >= 2:
+                                            self.block_ip(src_ip, "WebSocket flood attack", block_time=600)
+                            
+                            # Check for HTTP/2 traffic signatures
+                            is_http2 = False
+                            if payload and isinstance(payload, bytes):
+                                # HTTP/2 preface magic starts with 'PRI * HTTP/2.0'
+                                if b'PRI * HTTP/2.0' in payload:
+                                    is_http2 = True
+                                # HTTP/2 frames often begin with a specific pattern
+                                elif len(payload) > 9 and payload[0] in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
+                                    # Simple heuristic: HTTP/2 frame header check
+                                    if payload[3] in [0, 1, 2, 4, 6, 8]:  # Common HTTP/2 frame types
+                                        is_http2 = True
+                                
+                            if is_http2:
+                                current_time = time.time()
+                                with self.websocket_lock:  # Reusing same lock for related protocols
+                                    # Initialize tracking for this IP if not exists
+                                    if src_ip not in self.websocket_tracker:
+                                        self.websocket_tracker[src_ip] = {
+                                            'first_seen': current_time,
+                                            'last_seen': current_time,
+                                            'websocket_count': 0,
+                                            'http2_count': 0,
+                                            'last_alert': 0,
+                                            'websocket_rate': [],  # Track WebSocket frame arrival times
+                                            'http2_rate': [],  # Track HTTP/2 frame arrival times
+                                            'websocket_endpoints': set(),  # Track WebSocket endpoints being targeted
+                                            'http2_endpoints': set()  # Track HTTP/2 endpoints being targeted
+                                        }
+                                    
+                                    # Update tracking
+                                    tracker = self.websocket_tracker[src_ip]
+                                    tracker['last_seen'] = current_time
+                                    tracker['websocket_count'] += 1
+                                    
+                                    # Track WebSocket rate with sliding window
+                                    tracker['websocket_rate'].append(current_time)
+                                    if len(tracker['websocket_rate']) > 10:
+                                        tracker['websocket_rate'] = tracker['websocket_rate'][-10:]
+                                    
+                                    # Extract WebSocket target info if possible (simplified)
+                                    ws_path = "unknown"
+                                    if b'Sec-WebSocket-Protocol:' in payload:
+                                        try:
+                                            path_start = payload.find(b'Sec-WebSocket-Protocol:') + 23
+                                            path_end = payload.find(b'\r\n', path_start)
+                                            if path_end > path_start:
+                                                ws_path = payload[path_start:path_end].decode('utf-8', errors='ignore').strip()
+                                                tracker['websocket_endpoints'].add(ws_path)
+                                        except Exception:
+                                            pass
+                                    
+                                    # Also try to extract the target URI 
+                                    if b'GET ' in payload and b' HTTP/' in payload:
+                                        try:
+                                            uri_start = payload.find(b'GET ') + 4
+                                            uri_end = payload.find(b' HTTP/', uri_start)
+                                            if uri_end > uri_start:
+                                                uri = payload[uri_start:uri_end].decode('utf-8', errors='ignore').strip()
+                                                tracker['websocket_endpoints'].add(uri)
+                                        except Exception:
+                                            pass
+                                            
+                                    # Check for WebSocket flooding attacks
+                                    detection_window = 5  # 5 seconds
+                                    rate_threshold = 50   # 50 frames within detection window is suspicious
+                                    current_rate = sum(1 for t in tracker['websocket_rate'] if current_time - t <= detection_window)
+                                    
+                                    if (current_rate >= rate_threshold and 
+                                            tracker['websocket_count'] > 100 and 
+                                            current_time - tracker.get('last_alert', 0) > 60):  # Alert at most once per minute
+                                        
+                                        # Potential WebSocket flood attack detected
+                                        alert_msg = f"Potential WebSocket flood attack from {src_ip}: {current_rate} frames in {detection_window}s"
+                                        self.alert(alert_msg, src_ip, 'websocket_flood', severity=3)
+                                        tracker['last_alert'] = current_time
+                                        
+                                        if self.protection_level >= 2:
+                                            self.block_ip(src_ip, "WebSocket flood attack", block_time=600)
+                            
+                            # Check for HTTP/2 traffic signatures
+                            is_http2 = False
+                            if payload and isinstance(payload, bytes):
+                                # HTTP/2 preface magic starts with 'PRI * HTTP/2.0'
+                                if b'PRI * HTTP/2.0' in payload:
+                                    is_http2 = True
+                                # HTTP/2 frames often begin with a specific pattern
+                                elif len(payload) > 9 and payload[0] in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
+                                    # Simple heuristic: HTTP/2 frame header check
+                                    if payload[3] in [0, 1, 2, 4, 6, 8]:  # Common HTTP/2 frame types
+                                        is_http2 = True
+                                
+                            if is_http2:
+                                current_time = time.time()
+                                with self.websocket_lock:  # Reusing same lock for related protocols
+                                    # Initialize tracking for this IP if not exists
+                                    if src_ip not in self.websocket_tracker:
+                                        self.websocket_tracker[src_ip] = {
+                                            'first_seen': current_time,
+                                            'last_seen': current_time,
+                                            'websocket_count': 0,
+                                            'http2_count': 0,
+                                            'last_alert': 0,
+                                            'websocket_rate': [],  # Track WebSocket frame arrival times
+                                            'http2_rate': [],  # Track HTTP/2 frame arrival times
+                                            'websocket_endpoints': set(),  # Track WebSocket endpoints being targeted
+                                            'http2_endpoints': set()  # Track HTTP/2 endpoints being targeted
+                                        }
+                                    
+                                    # Update tracking
+                                    tracker = self.websocket_tracker[src_ip]
+                                    tracker['last_seen'] = current_time
+                                    tracker['http2_count'] += 1
+                                    
+                                    # Track HTTP/2 rate with sliding window
+                                    tracker['http2_rate'].append(current_time)
+                                    if len(tracker['http2_rate']) > 10:
+                                        tracker['http2_rate'] = tracker['http2_rate'][-10:]
+                                        
+                                    # Extract target URI if possible (simplified)
+                                    uri_path = "unknown"
+                                    if b':path:' in payload:
+                                        try:
+                                            path_start = payload.find(b':path:') + 6
+                                            path_end = payload.find(b'\r\n', path_start)
+                                            if path_end > path_start:
+                                                uri_path = payload[path_start:path_end].decode('utf-8', errors='ignore').strip()
+                                                tracker['http2_endpoints'].add(uri_path)
+                                        except Exception:
+                                            pass
+                                            
+                                    # Check for HTTP/2 flooding attacks
+                                    detection_window = 5  # 5 seconds
+                                    rate_threshold = 60   # 60 frames within detection window is suspicious
+                                    current_rate = sum(1 for t in tracker['http2_rate'] if current_time - t <= detection_window)
+                                    
+                                    if (current_rate >= rate_threshold and 
+                                            tracker['http2_count'] > 120 and 
+                                            current_time - tracker.get('last_alert', 0) > 60):  # Alert at most once per minute
+                                        
+                                        # Potential HTTP/2 flood attack detected
+                                        alert_msg = f"Potential HTTP/2 flood attack from {src_ip}: {current_rate} frames in {detection_window}s"
+                                        self.alert(alert_msg, src_ip, 'http2_flood', severity=3)
+                                        tracker['last_alert'] = current_time
+                                        
+                                        if self.protection_level >= 2:
+                                            self.block_ip(src_ip, "HTTP/2 flood attack", block_time=600)
+                                            # Stats tracking for HTTP/2 flood attacks
+                                            with self.stats_lock:
+                                                if 'http2_flood_detected' not in self.stats:
+                                                    self.stats['http2_flood_detected'] = 0
+                                                self.stats['http2_flood_detected'] += 1
+                    except Exception as e:
+                        logging.debug(f"Error analyzing WebSocket or HTTP/2 packet: {str(e)}")
+                
+                # SYN flood detection for any connection
+                if dst_port not in [53, 123]:  # Skip DNS and NTP
+                    try:
+                        # SYN flood detection logic starts here
+                        current_time = time.time()
+                        
+                        # Check if this is a SYN packet
+                        if flags & 0x02 and not flags & 0x10:  # SYN flag set, ACK flag not set
+                            with self.syn_lock:
+                                # Initialize tracking for this IP if not exists
+                                if src_ip not in self.syn_tracker:
+                                    self.syn_tracker[src_ip] = {
+                                        'first_seen': current_time,
+                                        'count': 0,
+                                        'last_seen': current_time,
+                                        'ports': set(),
+                                        'last_alert': 0, 
+                                        'syn_rate': [],  # Track packet arrival times for rate calculation
+                                        'repeat_ports': {},  # Track repeated SYNs to same port
+                                    }
+                                
+                                # Update tracking
+                                tracker = self.syn_tracker[src_ip]
+                                tracker['count'] += 1
+                                tracker['last_seen'] = current_time
+                                tracker['ports'].add(dst_port)
+                                
+                                # Track SYN rate with sliding window
+                                tracker['syn_rate'].append(current_time)
+                                if len(tracker['syn_rate']) > 20:  # Limit this to avoid excessive memory usage
+                                    tracker['syn_rate'] = tracker['syn_rate'][-20:]
+                                
+                                # Track repeated SYNs to the same port
+                                if dst_port in tracker['repeat_ports']:
+                                    tracker['repeat_ports'][dst_port] += 1
+                                else:
+                                    tracker['repeat_ports'][dst_port] = 1
+                    except Exception as e:
+                        logging.debug(f"Error in SYN flood detection: {str(e)}")
+                        
+            # SYN flood detection will be implemented here
+            # For now we'll continue with other packet processing
+            
+            # Begin basic threat analysis for all packet types
+            if not packet.haslayer('IP'):
+                return
+                
+            # Get the IP layer for analysis
+            ip = packet.getlayer('IP')
+            src_ip = ip.src
+            dst_ip = ip.dst
+            
+            # For TCP packets, analyze for threats
+            if packet.haslayer('TCP'):
+                tcp = packet.getlayer('TCP')
+                src_port = tcp.sport
+                dst_port = tcp.dport
+                
+                # Check for SYN flood
+                if tcp.flags & 0x02 and not (tcp.flags & 0x10):  # SYN but not ACK
+                    self._check_syn_flood(src_ip, dst_ip, dst_port, current_time)
+                # Check for port scan attempts
+                self._check_port_scan(src_ip, dst_ip, dst_port, current_time)
+                
+                # Check for TCP flag manipulation (NULL, XMAS, FIN scans)
+                self._check_tcp_flags(tcp.flags, src_ip, dst_ip, current_time)
+                
+                # Track sequence number anomalies
+                self._check_sequence_anomaly(src_ip, tcp.seq, current_time)
+            
+            # UDP attack detection
+            elif packet.haslayer('UDP'):
+                udp = packet.getlayer('UDP')
+                self._check_udp_flood(src_ip, dst_ip, udp.dport, current_time)
+            
+            # ICMP attack detection  
+            elif packet.haslayer('ICMP'):
+                icmp = packet.getlayer('ICMP')
+                self._check_icmp_flood(src_ip, dst_ip, current_time)
+            
+            # Check for fragmentation attacks
+            self._check_fragmentation(ip, src_ip, current_time)
+            
+        except Exception as e:
+            logging.error(f"Error processing packet: {str(e)}")
+                
+    def _check_syn_flood(self, src_ip, dst_ip, dst_port, current_time):
+        """Check for SYN flood attacks"""
+        with self.syn_lock:
+            # Create tracker for source IP if it doesn't exist
+            if src_ip not in self.syn_tracker:
+                self.syn_tracker[src_ip] = {
+                    'count': 0,
+                    'ports': set(),
+                    'first_seen': current_time,
+                    'syn_rate': [],
+                    'repeat_ports': {}
+                }
+            
+            # Update tracking
+            tracker = self.syn_tracker[src_ip]
+            tracker['count'] += 1
+            tracker['ports'].add(dst_port)
+            
+            # Track SYN rate with sliding window
+            tracker['syn_rate'].append(current_time)
+            if len(tracker['syn_rate']) > 20:  # Limit this to avoid excessive memory usage
+                tracker['syn_rate'] = tracker['syn_rate'][-20:]
+            
+            # Track repeated SYNs to the same port
+            if dst_port in tracker['repeat_ports']:
+                tracker['repeat_ports'][dst_port] += 1
+            else:
+                tracker['repeat_ports'][dst_port] = 1
+                
+            # Check for SYN flood
+            flood_window = 5  # 5 seconds
+            rate_threshold = 50  # 50 SYNs within flood window is suspicious
+            syn_count_in_window = sum(1 for t in tracker['syn_rate'] if current_time - t <= flood_window)
+            
+            if (syn_count_in_window >= rate_threshold and 
+                    tracker['count'] > 100 and 
+                    current_time - tracker.get('last_alert', 0) > 60):  # Rate limit alerts
+                # Potential SYN flood attack detected
+                alert_msg = f"Potential SYN flood attack from {src_ip}: {tracker['count']} SYNs in {flood_window}s to {len(tracker['ports'])} ports"
+                self.alert(alert_msg, src_ip, 'syn_flood', severity=3)
+                tracker['last_alert'] = current_time
+                
+                if self.protection_level >= 2:
+                    self.block_ip(src_ip, "SYN flooding")
+                    
+            # Clean up old counts if needed
+            if current_time - tracker['first_seen'] > self.syn_flood_timeout:
+                # Only reset if the attack isn't ongoing based on rate
+                if syn_count_in_window < 10:
+                    tracker['first_seen'] = current_time
+                    tracker['count'] = 1
+                    tracker['ports'] = set([dst_port])
+                    tracker['repeat_ports'] = {dst_port: 1}
+                    # Keep syn_rate for continuous monitoring
+                    
+    def _check_port_scan(self, src_ip, dst_ip, dst_port, current_time):
+        """Check for port scanning activity"""
+        with self.syn_lock:
+            # Create tracker for source IP if it doesn't exist
+            if src_ip not in self.syn_tracker:
+                self.syn_tracker[src_ip] = {
+                    'count': 0,
+                    'ports': set(),
+                    'first_seen': current_time,
+                    'syn_rate': [],
+                    'repeat_ports': {}
+                }
+            
+            # Update tracking
+            tracker = self.syn_tracker[src_ip]
+            tracker['count'] += 1
+            tracker['ports'].add(dst_port)
+            
+            # Track SYN rate with sliding window
+            tracker['syn_rate'].append(current_time)
+            if len(tracker['syn_rate']) > 20:  # Limit this to avoid excessive memory usage
+                tracker['syn_rate'] = tracker['syn_rate'][-20:]
+            
+            # Track repeated SYNs to the same port
+            if dst_port in tracker['repeat_ports']:
+                tracker['repeat_ports'][dst_port] += 1
+            else:
+                tracker['repeat_ports'][dst_port] = 1
+                
+            # Check for port scanning
+            scan_window = 5  # 5 seconds
+            rate_threshold = 20  # 20 SYNs within scan window is suspicious
+            syn_count_in_window = sum(1 for t in tracker['syn_rate'] if current_time - t <= scan_window)
+            
+            if (syn_count_in_window >= rate_threshold and 
+                    tracker['count'] > 50 and 
+                    current_time - tracker.get('last_alert', 0) > 60):  # Rate limit alerts
+                # Potential port scanning detected
+                alert_msg = f"Potential port scanning from {src_ip}: {tracker['count']} SYNs in {scan_window}s to {len(tracker['ports'])} ports"
+                self.alert(alert_msg, src_ip, 'port_scan', severity=2)
+                tracker['last_alert'] = current_time
+                
+                if self.protection_level >= 2:
+                    self.block_ip(src_ip, "Port scanning")
+                    
+            # Clean up old counts if needed
+            if current_time - tracker['first_seen'] > self.syn_flood_timeout:
+                # Only reset if the attack isn't ongoing based on rate
+                if syn_count_in_window < 10:
+                    tracker['first_seen'] = current_time
+                    tracker['count'] = 1
+                    tracker['ports'] = set([dst_port])
+                    tracker['repeat_ports'] = {dst_port: 1}
+    def _check_tcp_flags(self, flags, src_ip, dst_ip, current_time):
+        """Check TCP flags for suspicious patterns (NULL, XMAS, FIN scans)"""
+        # NULL scan: no flags set
+        is_null_scan = flags == 0
+        
+        # XMAS scan: FIN, PSH, URG flags set
+        is_xmas_scan = flags & 0x29 == 0x29
+        
+        # FIN scan: only FIN flag set
+        is_fin_scan = flags == 0x01
+        
+        if is_null_scan or is_xmas_scan or is_fin_scan:
+            # Track this source
+            with self.tcp_flags_lock:
+                if src_ip not in self.tcp_flags_tracker:
+                    self.tcp_flags_tracker[src_ip] = {
+                        'count': 0,
+                        'first_seen': current_time,
+                        'null_count': 0,
+                        'xmas_count': 0,
+                        'fin_count': 0
+                    }
+                
+                # Update counts
+                tracker = self.tcp_flags_tracker[src_ip]
+                tracker['count'] += 1
+                
+                if is_null_scan:
+                    tracker['null_count'] += 1
+                    scan_type = "NULL"
+                elif is_xmas_scan:
+                    tracker['xmas_count'] += 1
+                    scan_type = "XMAS"
+                else:  # FIN scan
+                    tracker['fin_count'] += 1
+                    scan_type = "FIN"
+                
+                # Alert if we've seen enough suspicious packets
+                if (tracker['count'] >= 5 and
+                        current_time - tracker.get('last_alert', 0) > 60):  # Rate limit alerts
+                    alert_msg = f"{scan_type} scan detected from {src_ip}"
     def start_protection(self):
         if not self.interface:
             print(f"{Fore.RED}Error: No network interface selected!{Style.RESET_ALL}")
@@ -2664,6 +4563,18 @@ class OpenMammoth:
 
         if not self.is_running:
             try:
+                # Create a packet executor if not already present
+                # This ensures we always have a thread pool for packet processing
+                if not hasattr(self, 'packet_executor') or self.packet_executor is None:
+                    # Create a larger thread pool for faster packet processing
+                    self.packet_executor = ThreadPoolExecutor(max_workers=20)
+                    logging.info(f"Created packet processing thread pool with 20 workers")
+                
+                # Optimize packet capture settings
+                # 1. Set a reasonable timeout for Scapy sniff function
+                # 2. Use proper filter to reduce packet load (instead of processing everything)
+                # 3. Adjust store parameter to reduce memory usage
+                
                 # Check if interface exists and is up
                 interfaces = self.get_available_interfaces()
                 interface_exists = False
@@ -2711,13 +4622,48 @@ class OpenMammoth:
                         print(f"{Fore.GREEN}[+] Protection system is now active{Style.RESET_ALL}")
                         print(f"\n{Fore.CYAN}[*] Monitoring network traffic...{Style.RESET_ALL}")
                         
-                        # Start sniffing with store=0 to avoid memory issues
-                        sniff(iface=self.interface, 
-                              prn=self.packet_handler, 
-                              store=0,
-                              filter="ip",  # Only capture IP packets
-                              stop_filter=lambda p: not self.is_running)
-                              
+                        # Optimize packet capture for performance
+                        # - store=False: No packets stored in memory
+                        # - filter="ip": Only process IP packets (reduces CPU load)
+                        # - timeout=1: Process in small batches to avoid blocking
+                        
+                        # Performance monitoring
+                        last_packet_count = 0
+                        last_time = time.time()
+                        performance_check_interval = 30  # seconds
+                        
+                        # Main packet capture loop - processed in small timeouts
+                        # to avoid freezing and allow for regular cleanup
+                        while self.is_running:
+                            try:
+                                # Capture in small batches with timeout
+                                sniff(iface=self.interface, 
+                                     prn=self.packet_handler, 
+                                     store=False,  # Never store packets in memory
+                                     filter="ip",  # Only capture IP packets
+                                     timeout=1)    # Process 1 second at a time
+                                
+                                # Performance monitoring - log packet rate every 30 seconds
+                                current_time = time.time()
+                                if current_time - last_time > performance_check_interval:
+                                    with self.stats_lock:
+                                        current_count = self.stats['total_packets']
+                                    
+                                    # Calculate packets per second
+                                    packets_captured = current_count - last_packet_count
+                                    duration = current_time - last_time
+                                    packet_rate = packets_captured / duration
+                                    
+                                    # Log performance metrics
+                                    logging.info(f"Performance: {packet_rate:.2f} packets/sec over {duration:.1f}s")
+                                    last_packet_count = current_count
+                                    last_time = current_time
+                                
+                            except Exception as loop_err:
+                                logging.debug(f"Packet capture iteration error: {str(loop_err)}")
+                                # Small sleep to avoid tight loop in case of persistent errors
+                                time.sleep(0.1)
+                                
                     except PermissionError:
                         logging.error("Permission denied when starting packet capture. Make sure you're running as root.")
                         print(f"{Fore.RED}Error: Permission denied. Make sure you're running as root.{Style.RESET_ALL}")
@@ -2801,6 +4747,27 @@ class OpenMammoth:
         except Exception as e:
             logging.error(f"Error setting up signal handlers: {str(e)}")
             print(f"{Fore.RED}Warning: Could not set up signal handlers: {str(e)}{Style.RESET_ALL}")
+            
+    def block_ip(self, ip, reason="Unknown"):
+        """Add an IP to the blacklist"""
+        try:
+            if ip not in getattr(self, 'blacklist', []):
+                self.blacklist.append(ip)
+                logging.warning(f"Added {ip} to blacklist: {reason}")
+                # Print to console for immediate visibility
+                print(f"{Fore.RED}[ALERT] Blocked {ip}: {reason}{Style.RESET_ALL}")
+                
+                with self.stats_lock:
+                    if 'ips_blocked' not in self.stats:
+                        self.stats['ips_blocked'] = 0
+                    self.stats['ips_blocked'] += 1
+                return True
+            else:
+                # Already blocked
+                return False
+        except Exception as e:
+            logging.error(f"Error blocking IP {ip}: {str(e)}")
+            return False
             
     def stop_protection(self):
         """Stop packet capture and all monitoring threads"""
@@ -2967,6 +4934,7 @@ class OpenMammoth:
 
     def settings_menu(self):
         while True:
+            os.system('clear')
             print(f"\n{Fore.CYAN}=== Settings ==={Style.RESET_ALL}")
             print(f"1. Protection Level (Current: {self.protection_level})")
             print(f"2. Advanced Protection (Current: {'Enabled' if self.advanced_protection else 'Disabled'})")
@@ -2974,10 +4942,11 @@ class OpenMammoth:
             print(f"4. Network Interface (Current: {self.interface if self.interface else 'Not selected'})")
             print(f"5. Threat Intelligence (Current: {'Enabled' if self.use_threat_intel else 'Disabled'})")
             print(f"6. Auto Updates (Current: {'Enabled' if self.auto_update else 'Disabled'})")
-            print(f"7. Reset IPTables Rules")
-            print("8. Back to Main Menu")
+            print(f"7. Honeypot Detection (Current: {'Enabled' if self.honeypot_enabled else 'Disabled'})")
+            print(f"8. Reset IPTables Rules")
+            print("9. Back to Main Menu")
             
-            choice = input("\nEnter your choice (1-8): ")
+            choice = input("\nEnter your choice (1-9): ")
             
             if choice == "1":
                 level = input("Enter protection level (1-4): ")
@@ -3016,8 +4985,19 @@ class OpenMammoth:
                     print(f"{Fore.YELLOW}Checking for updates...{Style.RESET_ALL}")
                     self.check_for_updates()
             elif choice == "7":
-                self.reset_iptables_rules()
+                self.honeypot_enabled = not self.honeypot_enabled
+                self.save_config()
+                status = "enabled" if self.honeypot_enabled else "disabled"
+                print(f"{Fore.GREEN}Honeypot detection {status}{Style.RESET_ALL}")
+                if self.honeypot_enabled:
+                    print(f"{Fore.YELLOW}\nConfigured honeypot ports: {', '.join(str(p) for p in self.honeypot_ports)}{Style.RESET_ALL}")
+                    print("These ports will be monitored for connection attempts.")
+                    print("Warning: Ensure these ports are not used by legitimate services")
+                    print("on your system to avoid false positives.")
+                input("\nPress Enter to continue...")
             elif choice == "8":
+                self.reset_iptables_rules()
+            elif choice == "9":
                 break
             else:
                 print(f"{Fore.RED}Invalid choice. Please try again.{Style.RESET_ALL}")
