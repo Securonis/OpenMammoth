@@ -722,27 +722,7 @@ class OpenMammoth:
             logging.error(f"Error in IP filtering: {str(e)}")
             return False
             
-    def cleanup_data(self):
-        """Clean up old data and expired entries to prevent memory leaks"""
-        try:
-            current_time = time.time()
-            
-            # Clean up expired entries in dictionaries
-            with self.connection_lock:
-                for ip in list(self.connection_tracker.keys()):
-                    if current_time - self.connection_tracker[ip]['last_seen'] > 3600:  # 1 hour
-                        del self.connection_tracker[ip]
-            
-            # Clean up packet rates
-            with self.packet_rates_lock:
-                for ip in list(self.packet_rates.keys()):
-                    if current_time - self.packet_rates[ip]['timestamp'] > 3600:  # 1 hour
-                        del self.packet_rates[ip]
-                        
-            logging.debug(f"Data cleanup completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        except Exception as e:
-            logging.error(f"Error in data cleanup: {str(e)}")
-            print(f"{Fore.YELLOW}[!] Warning: Data cleanup error: {str(e)}{Style.RESET_ALL}")
+    # cleanup_data functionality merged into cleanup_old_data
     
     def check_ip_rep_and_block(self, ip_src):
         """Check IP reputation and block if poor reputation"""
@@ -796,6 +776,52 @@ class OpenMammoth:
             logging.error(f"Error in IP reputation check: {str(e)}")
             
         return result
+    
+    def is_suspicious_ip_pattern(self, ip):
+        """Check if the IP matches known suspicious patterns"""
+        try:
+            if not isinstance(ip, str):
+                return False
+                
+            # Parse the IP address
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+            except ValueError:
+                # Not a valid IP address
+                return False
+                
+            # Check if it's a private IP (shouldn't be suspicious)
+            if ip_obj.is_private:
+                return False
+                
+            # Check for suspicious patterns
+            
+            # Pattern 1: IPs from known bad ranges
+            bad_ranges = [
+                '185.159.0.0/16',   # Example known botnet range
+                '194.67.71.0/24',    # Example known for malicious activity
+                '80.82.0.0/16'       # Example known for scanning
+            ]
+            
+            for bad_range in bad_ranges:
+                if ip_obj in ipaddress.ip_network(bad_range, strict=False):
+                    return True
+            
+            # Pattern 2: Check for sequential IP octets which can indicate automated tools
+            octets = ip.split('.')
+            if len(octets) == 4:  # IPv4
+                if octets[0] == octets[1] == octets[2]:
+                    return True
+                    
+                # Check for binary patterns in the last octet
+                # that are often used by scanning tools
+                if octets[3] in ['1', '255', '254']:
+                    return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"Error checking suspicious IP pattern: {str(e)}")
+            return False
                 
     def track_connections_and_rates(self, ip_src, ip_dst):
         """Update connection tracking and enforce rate limiting"""
@@ -2396,6 +2422,19 @@ class OpenMammoth:
         try:
             current_time = time.time()
             cutoff_time = current_time - 3600  # Remove data older than 1 hour
+            
+            # Add connection and packet rate cleanup from cleanup_data function
+            # Clean up expired entries in connection tracker
+            with self.connection_lock:
+                for ip in list(self.connection_tracker.keys()):
+                    if current_time - self.connection_tracker[ip]['last_seen'] > 3600:  # 1 hour
+                        del self.connection_tracker[ip]
+            
+            # Clean up packet rates
+            with self.packet_rates_lock:
+                for ip in list(self.packet_rates.keys()):
+                    if current_time - self.packet_rates[ip]['timestamp'] > 3600:  # 1 hour
+                        del self.packet_rates[ip]
             
             # Define maximum sizes for OrderedDict tracking structures to prevent unbounded growth
             # This is critical for preventing memory issues during extended operation
