@@ -266,6 +266,10 @@ class OpenMammoth:
         """Internal method to process a packet in a worker thread"""
         start_time = time.time()  # Start timing packet processing performance
         
+        # Update packet counter first - this should happen for EVERY packet
+        with self.stats_lock:
+            self.stats['total_packets'] += 1
+        
         # Skip non-IP packets
         if IP not in packet:
             return
@@ -562,7 +566,7 @@ class OpenMammoth:
             
             return detected
     
-    def check_packet_drops(self):
+    def check_packet_drops(self, packet=None):
         """Monitor for packet drops in high traffic environments"""
         try:
             with self.stats_lock:
@@ -586,8 +590,10 @@ class OpenMammoth:
         except Exception as drop_err:
             logging.error(f"Packet drop detection error: {str(drop_err)}")
             
-            # Standard attack detection
+        # Check if packet was provided for standard attack detection
+        if packet is not None:
             try:
+                ip_src = packet[IP].src if IP in packet else '0.0.0.0'
                 if self.detect_attacks(packet):
                     try:
                         self.block_ip(ip_src, reason="Network attack")
@@ -598,40 +604,41 @@ class OpenMammoth:
                     except Exception as block_err:
                         logging.error(f"Error blocking attacker {ip_src}: {str(block_err)}")
             except Exception as detect_err:
-                logging.error(f"Attack detection error for packet from {ip_src}: {str(detect_err)}")
+                logging.error(f"Attack detection error: {str(detect_err)}")
             
             # Update stats
             self.stats['total_packets'] += 1
             
-            # Performance monitoring for high-speed networks
-            processing_time = time.time() - start_time
-            if processing_time > 0.01:  # Track performance issues
-                if not hasattr(self, 'performance_issues'):
-                    self.performance_issues = 0
-                self.performance_issues += 1
+            try:
+                # Performance monitoring for high-speed networks
+                if 'start_time' in locals():
+                    processing_time = time.time() - start_time
+                    if processing_time > 0.01:  # Track performance issues
+                        if not hasattr(self, 'performance_issues'):
+                            self.performance_issues = 0
+                        self.performance_issues += 1
+                        
+                        if self.performance_issues % 100 == 0:
+                            logging.warning(f"Performance degradation: {processing_time:.4f}s per packet, may not keep up with gigabit speeds")
+                            self.high_load = True
                 
-                if self.performance_issues % 100 == 0:
-                    logging.warning(f"Performance degradation: {processing_time:.4f}s per packet, may not keep up with gigabit speeds")
-                    self.high_load = True
-            
-            # Periodic reporting
-            if self.stats['total_packets'] % 1000 == 0:
-                print(f"{Fore.CYAN}[*] Processed {self.stats['total_packets']} packets, blocked {self.stats['blocked_packets']} packets{Style.RESET_ALL}")
-        
-        except Exception as e:
-            # Critical error - top level exception handler ensures packet capture thread never dies
-            logging.error(f"Critical error in packet handler: {str(e)}")
-            print(f"{Fore.RED}[!] Critical error in packet handler: {str(e)}{Style.RESET_ALL}")
-            
-            # Track errors
-            if not hasattr(self, 'error_count'):
-                self.error_count = 0
-            self.error_count += 1
-            
-            # Alert on many errors
-            if self.error_count % 50 == 0:
-                print(f"{Fore.RED}[!!!] Multiple errors occurring: {self.error_count}. Check logs.{Style.RESET_ALL}")
-                logging.critical(f"Multiple packet handler errors: {self.error_count}. System may be unstable.")
+                # Periodic reporting
+                if self.stats['total_packets'] % 1000 == 0:
+                    print(f"{Fore.CYAN}[*] Processed {self.stats['total_packets']} packets, blocked {self.stats['blocked_packets']} packets{Style.RESET_ALL}")
+            except Exception as e:
+                # Critical error - top level exception handler ensures packet capture thread never dies
+                logging.error(f"Critical error in packet handler: {str(e)}")
+                print(f"{Fore.RED}[!] Critical error in packet handler: {str(e)}{Style.RESET_ALL}")
+                
+                # Track errors
+                if not hasattr(self, 'error_count'):
+                    self.error_count = 0
+                self.error_count += 1
+                
+                # Alert on many errors
+                if self.error_count % 50 == 0:
+                    print(f"{Fore.RED}[!!!] Multiple errors occurring: {self.error_count}. Check logs.{Style.RESET_ALL}")
+                    logging.critical(f"Multiple packet handler errors: {self.error_count}. System may be unstable.")
                 
             # Try to continue processing
 
@@ -689,7 +696,54 @@ class OpenMammoth:
             logging.error(f"Error enforcing memory limits: {str(e)}")
                 
     # Basic filtering - skip whitelisted and local IPs
-    # def filter_ip helper method should be defined here
+    def filter_ip(self, ip_addr):
+        """Filter IP addresses based on security policies"""
+        try:
+            if not isinstance(ip_addr, str):
+                return False
+                
+            # Check if IP is valid
+            try:
+                ipaddress.ip_address(ip_addr)
+            except ValueError:
+                logging.warning(f"Invalid IP address format: {ip_addr}")
+                return False
+                
+            # Apply filtering rules
+            if ip_addr in self.blocked_ips:
+                return True  # Block this IP
+                
+            # Check if IP is in whitelist
+            if hasattr(self, 'whitelist') and ip_addr in self.whitelist:
+                return False  # Don't block whitelisted IPs
+                
+            return False  # Default: don't block
+        except Exception as e:
+            logging.error(f"Error in IP filtering: {str(e)}")
+            return False
+            
+    def cleanup_data(self):
+        """Clean up old data and expired entries to prevent memory leaks"""
+        try:
+            current_time = time.time()
+            
+            # Clean up expired entries in dictionaries
+            with self.connection_lock:
+                for ip in list(self.connection_tracker.keys()):
+                    if current_time - self.connection_tracker[ip]['last_seen'] > 3600:  # 1 hour
+                        del self.connection_tracker[ip]
+            
+            # Clean up packet rates
+            with self.packet_rates_lock:
+                for ip in list(self.packet_rates.keys()):
+                    if current_time - self.packet_rates[ip]['timestamp'] > 3600:  # 1 hour
+                        del self.packet_rates[ip]
+                        
+            logging.debug(f"Data cleanup completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        except Exception as e:
+            logging.error(f"Error in data cleanup: {str(e)}")
+            print(f"{Fore.YELLOW}[!] Warning: Data cleanup error: {str(e)}{Style.RESET_ALL}")
+    
     def check_ip_rep_and_block(self, ip_src):
         """Check IP reputation and block if poor reputation"""
         try:
