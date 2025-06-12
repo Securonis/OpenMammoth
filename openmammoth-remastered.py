@@ -1294,13 +1294,8 @@ class OpenMammoth:
                 if attack_types > 2 or total_attacks > 5:
                     if not source_data['blocked'] and ip_src not in self.defense_ip_block_list:
                         try:
-                            # Shell injection tehlikesini önlemek için shell=False kullanıyoruz
-                            # ve IP adresini bir argüman olarak geçiyoruz
-                            # Öncesinde IP adresinin geçerli olup olmadığını doğruluyoruz
                             try:
-                                # IP doğrulaması
                                 ipaddress.ip_address(ip_src)
-                                # Güvenli çalıştırma yöntemi
                                 subprocess.run(
                                     ['iptables', '-A', 'INPUT', '-s', ip_src, '-j', 'DROP'],
                                     shell=False, check=True
@@ -1308,10 +1303,9 @@ class OpenMammoth:
                                 source_data['blocked'] = True
                                 self.defense_ip_block_list.add(ip_src)
                             except ValueError:
-                                # Geçersiz IP adresi
                                 logging.error(f"Invalid IP address attempted to be blocked: {ip_src}")
                                 print(f"{Fore.RED}[!] Invalid IP address detected: {ip_src}{Style.RESET_ALL}")
-                                return True  # IP geçerli değil ama yine de saldırı tespitini tamamla
+                                return True
                             logging.info(f"Persistent attacker {ip_src} blocked at firewall level")
                             print(f"{Fore.YELLOW}[+] Persistent attacker {ip_src} blocked at firewall level{Style.RESET_ALL}")
                         except Exception as e:
