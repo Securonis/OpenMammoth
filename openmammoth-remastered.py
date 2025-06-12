@@ -17,6 +17,7 @@ import ipapi  # For IP geolocation and VPN detection
 from datetime import datetime
 from scapy.all import *
 from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.dot11 import Dot11, Dot11Deauth, Dot11Auth, RadioTap
 from colorama import init, Fore, Style
 from threading import Lock, RLock
 from queue import Queue, Empty
@@ -165,7 +166,8 @@ class OpenMammoth:
             'udp': False,      # UDP flood protection active
             'icmp': False,     # ICMP flood protection active
             'fragment': False, # Fragment attack protection active
-            'dns': False       # DNS amplification protection active
+            'dns': False,      # DNS amplification protection active
+            'deauth': False    # Deauth attack protection active
         }
         
         # Runtime statistics - protected by stats_lock
@@ -185,7 +187,8 @@ class OpenMammoth:
             "reputation_blocks": 0,
             "dropped_packets": 0,
             "performance_issues": 0,
-            "unusual_flags": 0   # Eksik istatistik eklendi
+            "unusual_flags": 0,  
+            "deauth_attacks": 0
         }
         
         # Connection and packet tracking data structures
@@ -197,6 +200,7 @@ class OpenMammoth:
         self.udp_tracker = OrderedDict()         # For UDP flood detection 
         self.icmp_tracker = OrderedDict()        # For ICMP flood detection
         self.tcp_flags_tracker = OrderedDict()   # For unusual TCP flags
+        self.deauth_tracker = OrderedDict()      # For deauth attack detection
         self.port_scan_tracker = OrderedDict()   # For port scan detection
         self.seq_tracker = OrderedDict()         # For TCP sequence prediction attacks
         self.dns_tracker = OrderedDict()         # For DNS amplification attacks
@@ -1260,6 +1264,13 @@ class OpenMammoth:
             attack_detected = True
             attack_type = "ICMP Flood"
             self.defense_status['icmp'] = True
+            
+        # Check for Wi-Fi Deauth attack
+        elif self.check_deauth_attack(packet):
+            self.stats['deauth_attacks'] += 1
+            attack_detected = True
+            attack_type = "Deauth Attack"
+            self.defense_status['deauth'] = True
         
         # If any attack detected, add to tracking and log    
         if attack_detected:
@@ -1414,8 +1425,9 @@ class OpenMammoth:
             ports_targeted = len(tracker['ports'])
             syn_rate = syn_count / max(time_window, 0.1)  # Avoid division by zero
             
-            # Attack Pattern 1: High rate of SYN packets - with improved thresholds to reduce false positives
-            if time_window > 2 and syn_rate > 150 and syn_count > 300:  # More strict conditions
+            # Attack Pattern 1: High rate of SYN packets with a more responsive detection threshold
+            # We detect based on a combination of rate and total packet count
+            if (syn_count > 1000 and syn_rate > 200) or (syn_count > 5000 and syn_rate > 100) or (syn_count > 10000):
                 # Additional check for legitimate connections
                 if ip_src in self.whitelist or self._check_legitimate_connection(ip_src):
                     logging.debug(f"Ignored potential false positive SYN detection from whitelisted/legitimate IP {ip_src}")
@@ -1460,8 +1472,115 @@ class OpenMammoth:
                     if stale_ips:
                         logging.debug(f"Cleaned up {len(stale_ips)} stale SYN trackers")
             
-        return False
     
+    def check_deauth_attack(self, packet):
+        """Detect Wi-Fi deauthentication attacks
+        
+        Deauth attacks occur when an attacker sends deauthentication frames to force clients
+        off a wireless network, typically as a precursor to capturing handshakes or other attacks.
+        
+        Args:
+            packet: The packet to analyze
+            
+        Returns:
+            bool: True if a deauth attack is detected, False otherwise
+        """
+        try:
+            # Check if packet contains wireless (802.11) and deauth frame
+            # RadioTap is the header used by most wireless cards when capturing in monitor mode
+            if not (RadioTap in packet and Dot11 in packet):
+                return False
+                
+            # Check if it's a deauthentication frame (type=0, subtype=12)
+            if packet[Dot11].type != 0 or packet[Dot11].subtype != 12:
+                return False
+                
+            # Extract source/destination info
+            if hasattr(packet[Dot11], 'addr1') and hasattr(packet[Dot11], 'addr2'):
+                src_mac = packet[Dot11].addr2  # Source MAC address
+                dst_mac = packet[Dot11].addr1  # Destination MAC address
+                current_time = time.time()
+                
+                # Track deauth packets with timestamp and count
+                with self.tcp_flags_lock:  # We'll reuse an existing lock for simplicity
+                    # Initialize deauth tracker for this source MAC if it doesn't exist
+                    if src_mac not in self.deauth_tracker:
+                        self.deauth_tracker[src_mac] = {
+                            'count': 1,
+                            'first_seen': current_time,
+                            'last_seen': current_time,
+                            'targets': {dst_mac: 1},
+                            'alerted': False
+                        }
+                    else:
+                        # Update existing tracker
+                        tracker = self.deauth_tracker[src_mac]
+                        tracker['count'] += 1
+                        tracker['last_seen'] = current_time
+                        
+                        # Track targeted devices
+                        if dst_mac in tracker['targets']:
+                            tracker['targets'][dst_mac] += 1
+                        else:
+                            tracker['targets'][dst_mac] = 1
+                    
+                    # Now check for attack patterns
+                    tracker = self.deauth_tracker[src_mac]
+                    time_window = current_time - tracker['first_seen']  # Time window in seconds
+                    count = tracker['count']  # Number of deauth packets
+                    targets = len(tracker['targets'])  # Number of targeted devices
+                    
+                    # Attack scenario 1: High volume of deauth frames in a short period
+                    # Typical deauth attack sends many frames quickly to ensure disconnection
+                    if time_window < 5 and count > 15:
+                        # This is likely an attack - too many deauths too quickly
+                        if not tracker['alerted']:
+                            logging.warning(f"Deauth attack detected from {src_mac}: {count} packets in {time_window:.2f}s")
+                            print(f"{Fore.RED}[!] Wi-Fi Deauthentication attack detected from: {src_mac}{Style.RESET_ALL}")
+                            tracker['alerted'] = True
+                            self.stats['deauth_attacks'] += 1
+                            self.defense_status['deauth'] = True
+                        return True
+                        
+                    # Attack scenario 2: Multiple targets being deauthed systematically
+                    # Some attacks target multiple devices on a network
+                    if targets > 5 and time_window < 10 and count > 10:
+                        if not tracker['alerted']:
+                            logging.warning(f"Multi-target deauth attack from {src_mac}: {targets} devices targeted")
+                            print(f"{Fore.RED}[!] Wi-Fi Deauthentication attack detected targeting {targets} devices{Style.RESET_ALL}")
+                            tracker['alerted'] = True
+                            self.stats['deauth_attacks'] += 1
+                            self.defense_status['deauth'] = True
+                        return True
+                    
+                    # Attack scenario 3: Sustained periodic deauth
+                    # Some attacks send deauths periodically to keep devices off network
+                    if time_window > 30 and count > 30 and (count / time_window) > 0.5:
+                        if not tracker['alerted']:
+                            logging.warning(f"Sustained deauth attack from {src_mac}: {count} packets over {time_window:.2f}s")
+                            print(f"{Fore.RED}[!] Sustained Wi-Fi Deauthentication attack detected{Style.RESET_ALL}")
+                            tracker['alerted'] = True
+                            self.stats['deauth_attacks'] += 1
+                            self.defense_status['deauth'] = True
+                        return True
+                
+                    # Clean up old entries periodically
+                    if hasattr(self, 'last_deauth_cleanup') and current_time - getattr(self, 'last_deauth_cleanup', 0) > 60:
+                        self.last_deauth_cleanup = current_time
+                        stale_macs = []
+                        for mac, data in self.deauth_tracker.items():
+                            if current_time - data.get('last_seen', 0) > 300:  # 5 minutes
+                                stale_macs.append(mac)
+                        
+                        for mac in stale_macs:
+                            del self.deauth_tracker[mac]
+            
+            return False
+                
+        except Exception as e:
+            logging.debug(f"Error in deauth attack detection: {str(e)}")
+            return False
+            
     def _check_legitimate_connection(self, ip_src):
         """Determine if an IP is likely a legitimate connection even with high traffic
         
@@ -4647,59 +4766,26 @@ class OpenMammoth:
                         current_time - tracker.get('last_alert', 0) > 60):  # Rate limit alerts
                     alert_msg = f"{scan_type} scan detected from {src_ip}"
     def is_tor_running(self):
-        """Check if Tor is running on the system
+        """Check if Tor is running on the system using only systemctl
         Returns:
             tuple: (bool, str) - (is_tor_running, tor_service_info)
         """
         try:
-            # Method 1: Check for Tor service process
-            tor_processes = []
-            try:
-                # Check using ps command
-                ps_output = subprocess.check_output(["ps", "aux"], text=True)
-                for line in ps_output.splitlines():
-                    if "tor" in line.lower() and not "grep" in line.lower():
-                        tor_processes.append(line)
-            except Exception as e:
-                logging.debug(f"Error checking tor processes: {str(e)}")
-                
-            # Method 2: Check for Tor ports
-            tor_ports = [9050, 9051]  # Common Tor SOCKS and control ports
-            open_tor_ports = []
-            
-            for port in tor_ports:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(0.5)
-                        result = s.connect_ex(('127.0.0.1', port))
-                        if result == 0:
-                            open_tor_ports.append(port)
-                except Exception:
-                    pass
-                    
-            # Method 3: Check for Tor service status
+            # Simply check for Tor service status with systemctl
             tor_service = False
+            info = "Tor not running"
+            
             try:
                 # Try using systemctl (Linux)
                 service_output = subprocess.check_output(["systemctl", "status", "tor"], text=True, stderr=subprocess.STDOUT)
                 if "active (running)" in service_output.lower():
                     tor_service = True
+                    info = "Tor service is active"
             except Exception:
-                # Ignore errors if systemctl isn't available
+                # Ignore errors if systemctl isn't available or service not found
                 pass
                 
-            is_tor_running = bool(tor_processes or open_tor_ports or tor_service)
-            
-            # Build information string
-            info = []
-            if tor_processes:
-                info.append(f"Tor processes found: {len(tor_processes)}")
-            if open_tor_ports:
-                info.append(f"Tor ports open: {', '.join(map(str, open_tor_ports))}")
-            if tor_service:
-                info.append("Tor service is active")
-                
-            return is_tor_running, ", ".join(info) if info else "Unknown (detection method failed)"
+            return tor_service, info
             
         except Exception as e:
             logging.debug(f"Error in Tor detection: {str(e)}")
@@ -5227,6 +5313,7 @@ class OpenMammoth:
             # Other attack types
             print(f"UDP Floods: {self.stats['udp_floods']}")
             print(f"ICMP Floods: {self.stats['icmp_floods']}")
+            print(f"Deauth Attacks: {self.stats.get('deauth_attacks', 0)}")
             print(f"DNS Amplification: {self.stats['dns_amplification']}")
             print(f"Fragment Attacks: {self.stats['fragment_attacks']}")
             print(f"Malformed Packets: {self.stats['malformed_packets']}")
@@ -5634,19 +5721,24 @@ class OpenMammoth:
         print(f"{Fore.RED}•{Style.RESET_ALL} Malformed Packets")
         print(f"{Fore.RED}•{Style.RESET_ALL} IP Spoofing")
         print(f"{Fore.RED}•{Style.RESET_ALL} Application Layer Attacks")
+        print(f"{Fore.RED}•{Style.RESET_ALL} Wi-Fi Deauthentication Attacks")
         print(f"\n{Fore.CYAN}GitHub: https://github.com/Securonis/OpenMammoth {Style.RESET_ALL}")
         input("\nPress Enter to return to main menu...")
 
-    def get_available_interfaces(self):
-        """Get available network interfaces"""
-        interfaces = []
+    def detect_deauth_attack(self):
+        """Detect deauth attacks"""
         try:
-            # Use ip command to get interface information
-            ip_output = subprocess.check_output(['ip', 'addr', 'show'], text=True)
-            current_interface = None
+            # Use aircrack-ng to capture deauth packets
+            subprocess.run(['aircrack-ng', '-i', self.interface, '-w', 'deauth'], check=True)
             
-            for line in ip_output.split('\n'):
-                # Match interface line
+            # Parse the capture file to detect deauth attacks
+            with open('deauth-01.csv', 'r') as f:
+                for line in f:
+                    # Check for deauth packets
+                    if 'Deauthentication' in line:
+                        logging.warning("Deauth attack detected!")
+                        print(f"{Fore.RED}Deauth attack detected!{Style.RESET_ALL}")
+                        return True
                 if line and not line.startswith(' '):
                     interface_match = re.match(r'\d+:\s+([^:@]+)[:.@]', line)
                     if interface_match:
@@ -6308,6 +6400,7 @@ class OpenMammoth:
                 ("SYN Flood Detection", "Enhanced"),
                 ("DoS Protection", "Active"),
                 ("Port Scan Detection", "Active"),
+                ("Deauth Attack Detection", "Active"),
                 ("IP Reputation", "Active" if self.use_threat_intel else "Disabled"),
                 ("Blacklist Enforcement", "Active"),
                 ("Packet Filtering", "Active")
@@ -6328,6 +6421,7 @@ class OpenMammoth:
                 ("SYN Floods", self.stats.get('syn_floods', 0)),
                 ("UDP Floods", self.stats.get('udp_floods', 0)),
                 ("ICMP Floods", self.stats.get('icmp_floods', 0)),
+                ("Deauth Attacks", self.stats.get('deauth_attacks', 0)),
                 ("Port Scans", self.stats.get('port_scans', 0))
             ]
             
@@ -6566,6 +6660,353 @@ class OpenMammoth:
             return True
             
         return False
+
+    def is_private_ip(self, ip):
+        """Check if an IP address is in a private range"""
+        try:
+            if not ip or not isinstance(ip, str):
+                return False
+                
+            # Convert to IPv4Address object for easy comparison
+            ip_obj = ipaddress.IPv4Address(ip)
+            
+            # Check if IP is in private ranges
+            return ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+            
+        except Exception as e:
+            logging.error(f"Error checking if IP is private: {str(e)}")
+            return False
+            
+    def _check_sequence_anomaly(self, src_ip, seq_num, current_time):
+        """Check for TCP sequence number anomalies that could indicate spoofing or session hijacking"""
+        try:
+            # Initialize sequence tracking for this IP if not exists
+            if not hasattr(self, 'seq_tracker'):
+                self.seq_tracker = {}
+                
+            if src_ip not in self.seq_tracker:
+                self.seq_tracker[src_ip] = {
+                    'last_seq': seq_num,
+                    'last_time': current_time,
+                    'anomalies': 0,
+                    'seq_history': []
+                }
+                return
+                
+            # Get tracking data for this IP
+            tracker = self.seq_tracker[src_ip]
+            
+            # Add to sequence history (keep last 10)
+            tracker['seq_history'].append(seq_num)
+            if len(tracker['seq_history']) > 10:
+                tracker['seq_history'].pop(0)
+                
+            # Check time between packets
+            time_diff = current_time - tracker['last_time']
+            
+            # Calculate sequence difference
+            seq_diff = abs(seq_num - tracker['last_seq'])
+            
+            # Check for anomalies
+            if time_diff < 0.1 and seq_diff > 1000000000:  # Large jump in short time
+                tracker['anomalies'] += 1
+                logging.warning(f"TCP sequence anomaly from {src_ip}: large jump {seq_diff} in {time_diff:.4f}s")
+                
+                # Alert if multiple anomalies detected
+                if tracker['anomalies'] >= 3:
+                    with self.stats_lock:
+                        if 'sequence_anomalies' not in self.stats:
+                            self.stats['sequence_anomalies'] = 0
+                        self.stats['sequence_anomalies'] += 1
+                    
+                    print(f"{Fore.RED}[!] TCP sequence number manipulation detected from: {src_ip}{Style.RESET_ALL}")
+                    logging.warning(f"TCP sequence manipulation detected from {src_ip}: {tracker['anomalies']} anomalies")
+                    
+                    # Consider blocking if severe
+                    if tracker['anomalies'] >= 5 and self.protection_level >= 2:
+                        self.block_ip(src_ip, "TCP sequence manipulation", 300)  # Block for 5 minutes
+            
+            # Update tracking
+            tracker['last_seq'] = seq_num
+            tracker['last_time'] = current_time
+            
+        except Exception as e:
+            logging.error(f"Error checking sequence anomaly: {str(e)}")
+            pass
+            
+    def _check_udp_flood(self, src_ip, dst_ip, dst_port, current_time):
+        """Check for UDP flood attacks in real-time packet processing"""
+        try:
+            # Initialize UDP flood trackers if not exists
+            if not hasattr(self, 'udp_flood_tracker'):
+                self.udp_flood_tracker = {}
+                self.udp_port_tracker = {}
+                self.last_udp_cleanup = current_time
+            
+            # Track by source IP
+            if src_ip not in self.udp_flood_tracker:
+                self.udp_flood_tracker[src_ip] = {
+                    'count': 1,
+                    'first_packet': current_time,
+                    'last_packet': current_time,
+                    'ports': {dst_port: 1},
+                    'targets': {dst_ip: 1}
+                }
+            else:
+                # Update existing tracker
+                tracker = self.udp_flood_tracker[src_ip]
+                tracker['count'] += 1
+                tracker['last_packet'] = current_time
+                
+                # Track destination ports
+                if dst_port in tracker['ports']:
+                    tracker['ports'][dst_port] += 1
+                else:
+                    tracker['ports'][dst_port] = 1
+                    
+                # Track target IPs
+                if dst_ip in tracker['targets']:
+                    tracker['targets'][dst_ip] += 1
+                else:
+                    tracker['targets'][dst_ip] = 1
+                
+                # Check for UDP flood patterns
+                time_window = current_time - tracker['first_packet']
+                if time_window > 0:
+                    packet_rate = tracker['count'] / time_window
+                    
+                    # Different thresholds based on time window
+                    threshold = 0
+                    if time_window < 1.0:
+                        threshold = 100  # Very high rate in short window
+                    elif time_window < 5.0:
+                        threshold = 50   # High rate in medium window
+                    else:
+                        threshold = 30   # Sustained rate in longer window
+                    
+                    # Check if rate exceeds threshold
+                    if packet_rate > threshold:
+                        # Check if targeting many ports (port scan) or single port (flood)
+                        port_count = len(tracker['ports'])
+                        target_count = len(tracker['targets'])
+                        
+                        # UDP flood typically targets few ports but at high volume
+                        if port_count <= 5 and packet_rate > threshold:
+                            with self.stats_lock:
+                                if 'udp_floods' not in self.stats:
+                                    self.stats['udp_floods'] = 0
+                                self.stats['udp_floods'] += 1
+                                
+                            # Log the attack
+                            attack_msg = f"UDP flood from {src_ip}: {tracker['count']} packets at {packet_rate:.1f} pps"
+                            logging.warning(attack_msg)
+                            print(f"{Fore.RED}[!] {attack_msg}{Style.RESET_ALL}")
+                            
+                            # Block if protection level is high enough
+                            if self.protection_level >= 2:
+                                self.block_ip(src_ip, "UDP flood", 300)  # Block for 5 minutes
+                                
+                            return True
+            
+            # Clean up trackers periodically
+            if current_time - self.last_udp_cleanup > 60:
+                self.last_udp_cleanup = current_time
+                stale_ips = []
+                
+                # Find stale entries
+                for ip, data in self.udp_flood_tracker.items():
+                    if current_time - data['last_packet'] > 300:  # 5 minutes
+                        stale_ips.append(ip)
+                
+                # Remove stale entries
+                for ip in stale_ips:
+                    del self.udp_flood_tracker[ip]
+                    
+            return False
+                
+        except Exception as e:
+            logging.error(f"Error checking UDP flood: {str(e)}")
+            return False
+            
+    def _check_fragmentation(self, ip_pkt, src_ip, current_time):
+        """Check for IP fragmentation attacks in real-time packet processing"""
+        try:
+            # Initialize fragmentation trackers if not exists
+            if not hasattr(self, 'frag_detection_tracker'):
+                self.frag_detection_tracker = {}
+                self.last_frag_cleanup = current_time
+            
+            # Extract IP packet flags and fragment offset
+            flags = ip_pkt.flags
+            frag = ip_pkt.frag
+            ip_id = ip_pkt.id
+            pkt_len = len(ip_pkt)
+            
+            # Check if this is a fragment
+            is_fragment = (flags & 1) or (frag > 0)  # MF flag set or non-zero fragment offset
+            if not is_fragment:
+                return False
+                
+            # Create a unique key for this fragmented packet
+            frag_key = f"{src_ip}_{ip_id}"
+            
+            # Track fragments by source IP and ID
+            if frag_key not in self.frag_detection_tracker:
+                self.frag_detection_tracker[frag_key] = {
+                    'first_seen': current_time,
+                    'last_seen': current_time,
+                    'fragments': {frag: {'offset': frag * 8, 'size': pkt_len, 'mf': bool(flags & 1)}},
+                    'fragment_count': 1,
+                    'total_size': pkt_len,
+                    'suspicious': False,
+                    'attack_type': None
+                }
+            else:
+                # Update existing tracker
+                tracker = self.frag_detection_tracker[frag_key]
+                tracker['last_seen'] = current_time
+                tracker['total_size'] += pkt_len
+                tracker['fragment_count'] += 1
+                
+                # Add this fragment to tracking
+                if frag not in tracker['fragments']:
+                    tracker['fragments'][frag] = {
+                        'offset': frag * 8,
+                        'size': pkt_len,
+                        'mf': bool(flags & 1)
+                    }
+                
+                # Check for various fragmentation attacks
+                
+                # 1. Tiny Fragment Attack - fragments that are suspiciously small
+                if bool(flags & 1) and pkt_len < 200:
+                    tracker['suspicious'] = True
+                    tracker['attack_type'] = "Tiny Fragment Attack"
+                    logging.warning(f"Tiny fragment detected from {src_ip}, ID: {ip_id}, length: {pkt_len}")
+                    
+                # 2. Fragment Overlap Attack - fragments with overlapping offsets
+                fragments = tracker['fragments']
+                for other_frag, info in fragments.items():
+                    if frag != other_frag:
+                        this_start = frag * 8
+                        this_end = this_start + pkt_len
+                        other_start = info['offset']
+                        other_end = other_start + info['size']
+                        
+                        # Check for overlap
+                        if (this_start < other_end and this_end > other_start):
+                            tracker['suspicious'] = True
+                            tracker['attack_type'] = "Fragment Overlap Attack"
+                            logging.warning(f"Fragment overlap attack detected from {src_ip}, ID: {ip_id}")
+                
+                # 3. Fragment Count Attack - excessive number of fragments
+                if tracker['fragment_count'] > 64:  # Typical max fragments should be much lower
+                    tracker['suspicious'] = True
+                    tracker['attack_type'] = "Fragment Count Attack"
+                    logging.warning(f"Excessive fragments detected from {src_ip}, ID: {ip_id}, count: {tracker['fragment_count']}")
+                    
+                # 4. Fragment Timeout Attack - incomplete fragments persisting too long
+                if current_time - tracker['first_seen'] > 30 and len(fragments) < 64:
+                    has_last = any(not info['mf'] for _, info in fragments.items())
+                    if not has_last:  # No fragment with MF=0 (last fragment)
+                        tracker['suspicious'] = True
+                        tracker['attack_type'] = "Fragment Timeout Attack"
+                        logging.warning(f"Fragment timeout attack detected from {src_ip}, ID: {ip_id}")
+                
+                # 5. Jumbo Fragment Attack - total reassembled size is suspiciously large
+                if tracker['total_size'] > 65535:  # Max IP packet size
+                    tracker['suspicious'] = True
+                    tracker['attack_type'] = "Jumbo Fragment Attack"
+                    logging.warning(f"Jumbo fragment attack detected from {src_ip}, ID: {ip_id}, size: {tracker['total_size']}")
+                    
+                # Update stats and alert if suspicious
+                if tracker['suspicious']:
+                    with self.stats_lock:
+                        if 'fragment_attacks' not in self.stats:
+                            self.stats['fragment_attacks'] = 0
+                        self.stats['fragment_attacks'] += 1
+                    
+                    attack_msg = f"IP fragmentation attack ({tracker['attack_type']}) detected from {src_ip}"
+                    logging.warning(attack_msg)
+                    print(f"{Fore.RED}[!] {attack_msg}{Style.RESET_ALL}")
+                    
+                    # Block if protection level is high enough
+                    if self.protection_level >= 2:
+                        self.block_ip(src_ip, f"IP fragmentation attack: {tracker['attack_type']}", 300)
+                    
+                    return True
+            
+            # Clean up trackers periodically
+            if not hasattr(self, 'last_frag_cleanup') or (current_time - self.last_frag_cleanup > 60):
+                self.last_frag_cleanup = current_time
+                stale_keys = []
+                
+                # Find stale entries
+                for key, data in self.frag_detection_tracker.items():
+                    if current_time - data['last_seen'] > 300:  # 5 minutes
+                        stale_keys.append(key)
+                
+                # Remove stale entries
+                for key in stale_keys:
+                    del self.frag_detection_tracker[key]
+                    
+            return tracker['suspicious'] if 'suspicious' in tracker else False
+                
+        except Exception as e:
+            logging.error(f"Error checking IP fragmentation: {str(e)}")
+            return False
+    
+    def get_available_interfaces(self):
+        """Get available network interfaces"""
+        interfaces = []
+        try:
+            # Use ip command to get interface information
+            ip_output = subprocess.check_output(['ip', 'addr', 'show'], text=True)
+            current_interface = None
+            
+            for line in ip_output.split('\n'):
+                # Match interface line
+                if line and not line.startswith(' '):
+                    interface_match = re.match(r'\d+:\s+([^:@]+)[:.@]', line)
+                    if interface_match:
+                        current_interface = {
+                            'name': interface_match.group(1),
+                            'ip': '',
+                            'mac': '',
+                            'status': 'DOWN'
+                        }
+                        if 'UP' in line:
+                            current_interface['status'] = 'UP'
+                        interfaces.append(current_interface)
+                
+                # Match IP address line
+                elif current_interface and 'inet ' in line:
+                    ip_match = re.search(r'inet\s+([0-9.]+)/', line)
+                    if ip_match:
+                        current_interface['ip'] = ip_match.group(1)
+                
+                # Match MAC address line
+                elif current_interface and 'link/ether' in line:
+                    mac_match = re.search(r'link/ether\s+([0-9a-fA-F:]+)', line)
+                    if mac_match:
+                        current_interface['mac'] = mac_match.group(1)
+
+            # Filter out interfaces without IP addresses (except lo)
+            interfaces = [iface for iface in interfaces if iface['ip'] or iface['name'] == 'lo']
+            
+            if not interfaces:
+                logging.warning("No network interfaces found with IP addresses")
+            else:
+                logging.info(f"Found {len(interfaces)} network interfaces")
+                
+            return interfaces
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error running ip command: {str(e)}")
+            return []
+        except Exception as e:
+            logging.error(f"Error getting network interfaces: {str(e)}")
+            return []
 
 def main():
     if os.geteuid() != 0:
