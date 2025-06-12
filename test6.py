@@ -6733,6 +6733,100 @@ class OpenMammoth:
         except Exception as e:
             logging.error(f"Error checking sequence anomaly: {str(e)}")
             pass
+            
+    def _check_udp_flood(self, src_ip, dst_ip, dst_port, current_time):
+        """Check for UDP flood attacks in real-time packet processing"""
+        try:
+            # Initialize UDP flood trackers if not exists
+            if not hasattr(self, 'udp_flood_tracker'):
+                self.udp_flood_tracker = {}
+                self.udp_port_tracker = {}
+                self.last_udp_cleanup = current_time
+            
+            # Track by source IP
+            if src_ip not in self.udp_flood_tracker:
+                self.udp_flood_tracker[src_ip] = {
+                    'count': 1,
+                    'first_packet': current_time,
+                    'last_packet': current_time,
+                    'ports': {dst_port: 1},
+                    'targets': {dst_ip: 1}
+                }
+            else:
+                # Update existing tracker
+                tracker = self.udp_flood_tracker[src_ip]
+                tracker['count'] += 1
+                tracker['last_packet'] = current_time
+                
+                # Track destination ports
+                if dst_port in tracker['ports']:
+                    tracker['ports'][dst_port] += 1
+                else:
+                    tracker['ports'][dst_port] = 1
+                    
+                # Track target IPs
+                if dst_ip in tracker['targets']:
+                    tracker['targets'][dst_ip] += 1
+                else:
+                    tracker['targets'][dst_ip] = 1
+                
+                # Check for UDP flood patterns
+                time_window = current_time - tracker['first_packet']
+                if time_window > 0:
+                    packet_rate = tracker['count'] / time_window
+                    
+                    # Different thresholds based on time window
+                    threshold = 0
+                    if time_window < 1.0:
+                        threshold = 100  # Very high rate in short window
+                    elif time_window < 5.0:
+                        threshold = 50   # High rate in medium window
+                    else:
+                        threshold = 30   # Sustained rate in longer window
+                    
+                    # Check if rate exceeds threshold
+                    if packet_rate > threshold:
+                        # Check if targeting many ports (port scan) or single port (flood)
+                        port_count = len(tracker['ports'])
+                        target_count = len(tracker['targets'])
+                        
+                        # UDP flood typically targets few ports but at high volume
+                        if port_count <= 5 and packet_rate > threshold:
+                            with self.stats_lock:
+                                if 'udp_floods' not in self.stats:
+                                    self.stats['udp_floods'] = 0
+                                self.stats['udp_floods'] += 1
+                                
+                            # Log the attack
+                            attack_msg = f"UDP flood from {src_ip}: {tracker['count']} packets at {packet_rate:.1f} pps"
+                            logging.warning(attack_msg)
+                            print(f"{Fore.RED}[!] {attack_msg}{Style.RESET_ALL}")
+                            
+                            # Block if protection level is high enough
+                            if self.protection_level >= 2:
+                                self.block_ip(src_ip, "UDP flood", 300)  # Block for 5 minutes
+                                
+                            return True
+            
+            # Clean up trackers periodically
+            if current_time - self.last_udp_cleanup > 60:
+                self.last_udp_cleanup = current_time
+                stale_ips = []
+                
+                # Find stale entries
+                for ip, data in self.udp_flood_tracker.items():
+                    if current_time - data['last_packet'] > 300:  # 5 minutes
+                        stale_ips.append(ip)
+                
+                # Remove stale entries
+                for ip in stale_ips:
+                    del self.udp_flood_tracker[ip]
+                    
+            return False
+                
+        except Exception as e:
+            logging.error(f"Error checking UDP flood: {str(e)}")
+            return False
     
     def get_available_interfaces(self):
         """Get available network interfaces"""
