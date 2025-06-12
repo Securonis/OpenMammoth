@@ -4406,7 +4406,7 @@ class OpenMammoth:
             logging.error(f"Error processing packet: {str(e)}")
                 
     def _check_syn_flood(self, src_ip, dst_ip, dst_port, current_time):
-        """Check for SYN flood attacks"""
+        """Check for SYN flood attacks with enhanced detection and detailed logging"""
         with self.syn_lock:
             # Create tracker for source IP if it doesn't exist
             if src_ip not in self.syn_tracker:
@@ -4415,7 +4415,11 @@ class OpenMammoth:
                     'ports': set(),
                     'first_seen': current_time,
                     'syn_rate': [],
-                    'repeat_ports': {}
+                    'repeat_ports': {},
+                    'attack_pattern': '', 
+                    'severity_level': 0,
+                    'peak_rate': 0,
+                    'detection_details': {}
                 }
             
             # Update tracking
@@ -4423,42 +4427,136 @@ class OpenMammoth:
             tracker['count'] += 1
             tracker['ports'].add(dst_port)
             
-            # Track SYN rate with sliding window
+            # Track SYN rate with multiple time windows for better pattern detection
             tracker['syn_rate'].append(current_time)
-            if len(tracker['syn_rate']) > 20:  # Limit this to avoid excessive memory usage
-                tracker['syn_rate'] = tracker['syn_rate'][-20:]
+            if len(tracker['syn_rate']) > 100:  # Extended tracking for better pattern recognition
+                tracker['syn_rate'] = tracker['syn_rate'][-100:]
             
-            # Track repeated SYNs to the same port
+            # Track repeated SYNs to the same port - important for targeted attacks
             if dst_port in tracker['repeat_ports']:
                 tracker['repeat_ports'][dst_port] += 1
             else:
                 tracker['repeat_ports'][dst_port] = 1
-                
-            # Check for SYN flood
-            flood_window = 5  # 5 seconds
-            rate_threshold = 50  # 50 SYNs within flood window is suspicious
-            syn_count_in_window = sum(1 for t in tracker['syn_rate'] if current_time - t <= flood_window)
             
-            if (syn_count_in_window >= rate_threshold and 
-                    tracker['count'] > 100 and 
-                    current_time - tracker.get('last_alert', 0) > 60):  # Rate limit alerts
-                # Potential SYN flood attack detected
-                alert_msg = f"Potential SYN flood attack from {src_ip}: {tracker['count']} SYNs in {flood_window}s to {len(tracker['ports'])} ports"
-                self.alert(alert_msg, src_ip, 'syn_flood', severity=3)
+            # Multi-dimensional SYN flood detection using various time windows
+            time_windows = {'ultrafast': 1, 'fast': 3, 'medium': 5, 'extended': 10}
+            detection_results = {}
+            
+            # Calculate SYN rates for different time windows
+            for window_name, window_size in time_windows.items():
+                count = sum(1 for t in tracker['syn_rate'] if current_time - t <= window_size)
+                rate = count / window_size if window_size > 0 else 0
+                detection_results[window_name] = {
+                    'count': count,
+                    'rate': rate, 
+                    'window': window_size
+                }
+                
+            # Update peak rate if current rate is higher
+            current_peak_rate = max(result['rate'] for result in detection_results.values())
+            if current_peak_rate > tracker.get('peak_rate', 0):
+                tracker['peak_rate'] = current_peak_rate
+            
+            # Determine attack pattern and severity
+            severity = 0
+            attack_pattern = ''
+            
+            # Pattern 1: Rapid burst - extremely high rate in very short window
+            if detection_results['ultrafast']['count'] >= 30:
+                severity = max(severity, 4)
+                attack_pattern = 'Rapid Burst Attack'
+            
+            # Pattern 2: Sustained high rate
+            elif detection_results['medium']['count'] >= 50 and detection_results['extended']['count'] >= 80:
+                severity = max(severity, 3)
+                attack_pattern = 'Sustained High-Rate Attack'
+            
+            # Pattern 3: Distributed lower rate
+            elif detection_results['extended']['count'] >= 50 and len(tracker['ports']) > 10:
+                severity = max(severity, 2)
+                attack_pattern = 'Distributed Port Attack'
+            
+            # Pattern 4: Targeted attack - many SYNs to same port
+            max_port_hits = max(tracker['repeat_ports'].values()) if tracker['repeat_ports'] else 0
+            if max_port_hits >= 30:
+                severity = max(severity, 3)
+                most_hit_port = max(tracker['repeat_ports'].items(), key=lambda x: x[1])[0]
+                attack_pattern = f'Targeted Port Attack (Port {most_hit_port})'
+            
+            # Store detection details
+            tracker['detection_details'] = detection_results
+            tracker['severity_level'] = severity
+            if attack_pattern:
+                tracker['attack_pattern'] = attack_pattern
+            
+            # Alert if attack is detected and we haven't alerted recently
+            if (severity >= 2 and 
+                    current_time - tracker.get('last_alert', 0) > 30):  # Rate limit alerts to every 30s
+                
+                # Prepare detailed alert message
+                most_targeted_ports = sorted(tracker['repeat_ports'].items(), key=lambda x: x[1], reverse=True)[:3]
+                port_details = ", ".join([f"port {port}: {count} SYNs" for port, count in most_targeted_ports])
+                
+                alert_msg = f"SYN FLOOD ATTACK DETECTED - {attack_pattern}\n" \
+                          f"Source: {src_ip} | Severity: {severity}/4\n" \
+                          f"Total SYNs: {tracker['count']} | Peak Rate: {tracker['peak_rate']:.2f} pkts/sec\n" \
+                          f"Distinct Ports: {len(tracker['ports'])} | Most targeted: {port_details}\n" \
+                          f"1s rate: {detection_results['ultrafast']['rate']:.2f} | 5s rate: {detection_results['medium']['rate']:.2f} pkts/sec"
+                
+                # Log with appropriate severity
+                self.alert(alert_msg, src_ip, 'syn_flood', severity=severity)
+                logging.warning(f"SYN FLOOD: {src_ip} - {attack_pattern} - Severity {severity}/4")
+                
+                # Print to console with color based on severity
+                colors = {2: Fore.YELLOW, 3: Fore.RED, 4: Fore.MAGENTA}
+                print(f"\n{colors.get(severity, Fore.RED)}[SYN FLOOD ATTACK - {attack_pattern}] {src_ip}{Style.RESET_ALL}")
+                
+                # Take protective action based on severity
+                if severity >= 3 and self.protection_level >= 2:
+                    self.block_ip(src_ip, f"SYN flood attack - {attack_pattern}")
+                    print(f"{Fore.GREEN}[PROTECTION] Blocked {src_ip} due to SYN flood attack{Style.RESET_ALL}")
+                elif severity == 2 and self.protection_level >= 3:
+                    self.block_ip(src_ip, f"SYN flood attack - {attack_pattern}")
+                    print(f"{Fore.GREEN}[PROTECTION] Blocked {src_ip} due to SYN flood attack{Style.RESET_ALL}")
+                
                 tracker['last_alert'] = current_time
                 
-                if self.protection_level >= 2:
-                    self.block_ip(src_ip, "SYN flooding")
+                # Increment stats with more detailed breakdown
+                with self.stats_lock:
+                    if 'attack_types' not in self.stats:
+                        self.stats['attack_types'] = {}
+                    if 'syn_flood_patterns' not in self.stats['attack_types']:
+                        self.stats['attack_types']['syn_flood_patterns'] = {}
                     
-            # Clean up old counts if needed
+                    pattern_key = attack_pattern.split()[0].lower()
+                    self.stats['attack_types']['syn_flood_patterns'][pattern_key] = \
+                        self.stats['attack_types']['syn_flood_patterns'].get(pattern_key, 0) + 1
+                    
+                    self.stats['syn_floods'] = self.stats.get('syn_floods', 0) + 1
+                    
+            # Clean up old counts if needed but maintain intelligence
             if current_time - tracker['first_seen'] > self.syn_flood_timeout:
                 # Only reset if the attack isn't ongoing based on rate
-                if syn_count_in_window < 10:
+                if detection_results['medium']['count'] < 10:
+                    # Keep attack history but reset counters
+                    previous_pattern = tracker.get('attack_pattern', '')
+                    previous_severity = tracker.get('severity_level', 0)
+                    previous_peak_rate = tracker.get('peak_rate', 0)
+                    
                     tracker['first_seen'] = current_time
                     tracker['count'] = 1
                     tracker['ports'] = set([dst_port])
                     tracker['repeat_ports'] = {dst_port: 1}
-                    # Keep syn_rate for continuous monitoring
+                    tracker['syn_rate'] = [current_time]
+                    
+                    # Preserve attack intelligence
+                    if previous_pattern:
+                        tracker['historical_attacks'] = tracker.get('historical_attacks', []) + [{
+                            'timestamp': current_time,
+                            'pattern': previous_pattern,
+                            'severity': previous_severity,
+                            'peak_rate': previous_peak_rate
+                        }]
                     
     def _check_port_scan(self, src_ip, dst_ip, dst_port, current_time):
         """Check for port scanning activity"""
@@ -4554,6 +4652,65 @@ class OpenMammoth:
                 if (tracker['count'] >= 5 and
                         current_time - tracker.get('last_alert', 0) > 60):  # Rate limit alerts
                     alert_msg = f"{scan_type} scan detected from {src_ip}"
+    def is_tor_running(self):
+        """Check if Tor is running on the system
+        Returns:
+            tuple: (bool, str) - (is_tor_running, tor_service_info)
+        """
+        try:
+            # Method 1: Check for Tor service process
+            tor_processes = []
+            try:
+                # Check using ps command
+                ps_output = subprocess.check_output(["ps", "aux"], text=True)
+                for line in ps_output.splitlines():
+                    if "tor" in line.lower() and not "grep" in line.lower():
+                        tor_processes.append(line)
+            except Exception as e:
+                logging.debug(f"Error checking tor processes: {str(e)}")
+                
+            # Method 2: Check for Tor ports
+            tor_ports = [9050, 9051]  # Common Tor SOCKS and control ports
+            open_tor_ports = []
+            
+            for port in tor_ports:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.5)
+                        result = s.connect_ex(('127.0.0.1', port))
+                        if result == 0:
+                            open_tor_ports.append(port)
+                except Exception:
+                    pass
+                    
+            # Method 3: Check for Tor service status
+            tor_service = False
+            try:
+                # Try using systemctl (Linux)
+                service_output = subprocess.check_output(["systemctl", "status", "tor"], text=True, stderr=subprocess.STDOUT)
+                if "active (running)" in service_output.lower():
+                    tor_service = True
+            except Exception:
+                # Ignore errors if systemctl isn't available
+                pass
+                
+            is_tor_running = bool(tor_processes or open_tor_ports or tor_service)
+            
+            # Build information string
+            info = []
+            if tor_processes:
+                info.append(f"Tor processes found: {len(tor_processes)}")
+            if open_tor_ports:
+                info.append(f"Tor ports open: {', '.join(map(str, open_tor_ports))}")
+            if tor_service:
+                info.append("Tor service is active")
+                
+            return is_tor_running, ", ".join(info) if info else "Unknown (detection method failed)"
+            
+        except Exception as e:
+            logging.debug(f"Error in Tor detection: {str(e)}")
+            return False, "Error during detection"
+            
     def start_protection(self):
         if not self.interface:
             print(f"{Fore.RED}Error: No network interface selected!{Style.RESET_ALL}")
@@ -4563,6 +4720,21 @@ class OpenMammoth:
 
         if not self.is_running:
             try:
+                # Check for Tor network before starting
+                tor_running, tor_info = self.is_tor_running()
+                if tor_running:
+                    print(f"{Fore.RED} WARNING: Tor network appears to be running on this system! {Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}Using OpenMammoth with Tor may cause iptables conflicts and connection issues.{Style.RESET_ALL}")
+                    
+                    # Ask user for confirmation
+                    confirmation = input(f"\n{Fore.CYAN}Do you want to continue anyway? (y/N): {Style.RESET_ALL}").lower()
+                    if confirmation != 'y':
+                        print(f"{Fore.YELLOW}Protection startup cancelled by user.{Style.RESET_ALL}")
+                        return False
+                        
+                    print(f"\n{Fore.YELLOW}Proceeding with OpenMammoth startup despite Tor detection...{Style.RESET_ALL}")
+                    logging.warning(f"Starting OpenMammoth with Tor running detected.")
+                
                 # Create a packet executor if not already present
                 # This ensures we always have a thread pool for packet processing
                 if not hasattr(self, 'packet_executor') or self.packet_executor is None:
@@ -4821,17 +4993,39 @@ class OpenMammoth:
                 except Exception as pool_err:
                     logging.error(f"Error shutting down thread pool: {str(pool_err)}")
             
-            # Cleanup iptables rules, but only for temporary blocks (not blacklisted)
+            # Cleanup ALL iptables rules including blacklisted IPs
             for ip in list(self.blocked_ips.keys()):
-                if ip not in self.blacklist:  # Keep blocking IPs in the blacklist
-                    try:
-                        subprocess.run(
-                            ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP'],
-                            capture_output=True, text=True, check=True
-                        )
-                        del self.blocked_ips[ip]
-                    except Exception as e:
-                        logging.error(f"Error removing iptables rule for {ip}: {str(e)}")
+                try:
+                    logging.info(f"Removing iptables rule for {ip}")
+                    subprocess.run(
+                        ['iptables', '-D', 'INPUT', '-s', ip, '-j', 'DROP'],
+                        capture_output=True, text=True, check=False
+                    )
+                    del self.blocked_ips[ip]
+                except Exception as e:
+                    logging.error(f"Error removing iptables rule for {ip}: {str(e)}")
+            
+            # Additionally clean any potential OpenMammoth chain rules
+            try:
+                # Check if our chain exists
+                result = subprocess.run(
+                    ['iptables', '-L', 'OPENMAMMOTH', '-n'], 
+                    capture_output=True, text=True, check=False
+                )
+                if result.returncode == 0:  # Chain exists
+                    # Flush the chain
+                    subprocess.run(['iptables', '-F', 'OPENMAMMOTH'], check=False)
+                    # Remove reference from INPUT chain
+                    subprocess.run(['iptables', '-D', 'INPUT', '-j', 'OPENMAMMOTH'], check=False)
+                    # Delete the chain
+                    subprocess.run(['iptables', '-X', 'OPENMAMMOTH'], check=False)
+                    logging.info("Removed OpenMammoth iptables chain")
+            except Exception as e:
+                logging.error(f"Error cleaning up iptables chains: {str(e)}")
+            
+            # Log cleanup summary
+            logging.info(f"Cleaned up all {len(self.blocked_ips)} iptables rules")
+            self.blocked_ips = {}
             
             # Clean up resources
             try:
@@ -5014,24 +5208,56 @@ class OpenMammoth:
                 minutes, seconds = divmod(remainder, 60)
                 print(f"Uptime: {int(hours)}h {int(minutes)}m {int(seconds)}s")
             
+            # Basic statistics
+            print(f"\n{Fore.GREEN}=== Basic Statistics ==={Style.RESET_ALL}")
             print(f"Total Packets: {self.stats['total_packets']}")
             print(f"Blocked Packets: {self.stats['blocked_packets']}")
             print(f"Attacks Detected: {self.stats['attacks_detected']}")
+            
+            # Attack statistics with details
+            print(f"\n{Fore.YELLOW}=== Attack Statistics ==={Style.RESET_ALL}")
             print(f"Port Scans: {self.stats['port_scans']}")
-            print(f"SYN Floods: {self.stats['syn_floods']}")
+            
+            # Enhanced SYN flood statistics
+            syn_floods = self.stats.get('syn_floods', 0)
+            print(f"SYN Floods: {syn_floods}")
+            
+            # Show detailed SYN flood pattern breakdown if available
+            if 'attack_types' in self.stats and 'syn_flood_patterns' in self.stats['attack_types']:
+                patterns = self.stats['attack_types']['syn_flood_patterns']
+                if patterns:
+                    print(f"  ├─ {'SYN Flood Patterns':30}")
+                    for pattern_name, count in patterns.items():
+                        print(f"  │  ├─ {pattern_name.title():20}: {count}")
+            
+            # Other attack types
             print(f"UDP Floods: {self.stats['udp_floods']}")
             print(f"ICMP Floods: {self.stats['icmp_floods']}")
             print(f"DNS Amplification: {self.stats['dns_amplification']}")
             print(f"Fragment Attacks: {self.stats['fragment_attacks']}")
             print(f"Malformed Packets: {self.stats['malformed_packets']}")
             print(f"Spoofed IPs: {self.stats['spoofed_ips']}")
+            
+            # IP-based blocks
+            print(f"\n{Fore.MAGENTA}=== Block Statistics ==={Style.RESET_ALL}")
             print(f"Threat Intel Blocks: {self.stats['threat_intel_blocks']}")
             print(f"Reputation Blocks: {self.stats['reputation_blocks']}")
+            print(f"Blacklisted IPs: {len(self.blacklist)}")
+            print(f"Currently Blocked IPs: {len(self.blocked_ips)}")
             
-            # Packet rates and active connections
+            # Active connections
             if self.is_running:
-                print(f"\nActive connections: {len(self.connection_tracker)}")
+                print(f"\n{Fore.BLUE}=== Network Status ==={Style.RESET_ALL}")
+                print(f"Active connections: {len(self.connection_tracker)}")
                 
+                # Show most active IPs if available
+                if hasattr(self, 'syn_tracker') and self.syn_tracker:
+                    print(f"\n{Fore.CYAN}=== Most Active Source IPs ==={Style.RESET_ALL}")
+                    active_ips = sorted([(ip, data['count']) for ip, data in self.syn_tracker.items()], 
+                                       key=lambda x: x[1], reverse=True)[:5]
+                    for i, (ip, count) in enumerate(active_ips, 1):
+                        print(f"{i}. {ip} - {count} packets")
+            
             input("\nPress Enter to return to main menu...")
         except Exception as e:
             logging.error(f"Error displaying statistics: {str(e)}")
@@ -5668,6 +5894,13 @@ class OpenMammoth:
     def is_ip_in_blacklist(self, ip):
         """Check if IP is in blacklist"""
         return ip in self.blacklist
+        
+    def is_blacklisted_ip(self, packet):
+        """Check if a packet's source IP is in the blacklist"""
+        if packet.haslayer('IP'):
+            src_ip = packet.getlayer('IP').src
+            return self.is_ip_in_blacklist(src_ip)
+        return False
 
     def is_ip_in_whitelist(self, ip):
         """Check if IP is in whitelist"""
@@ -6067,17 +6300,62 @@ class OpenMammoth:
             hours, remainder = divmod(uptime, 3600)
             minutes, seconds = divmod(remainder, 60)
             
+            # Basic status information
             print(f"\n{Fore.GREEN}[+] Protection Status: ACTIVE{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[*] Interface: {self.interface}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[*] Protection Level: {self.protection_level}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[*] Advanced Protection: {'Enabled' if self.advanced_protection else 'Disabled'}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[*] Threat Intelligence: {'Enabled' if self.use_threat_intel else 'Disabled'}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[*] Uptime: {int(hours)}h {int(minutes)}m {int(seconds)}s{Style.RESET_ALL}")
-            print(f"\n{Fore.YELLOW}Current Statistics:{Style.RESET_ALL}")
+            
+            # Enhanced protection modules status
+            print(f"\n{Fore.MAGENTA}=== Active Protection Modules ==={Style.RESET_ALL}")
+            protection_modules = [
+                ("SYN Flood Detection", "Enhanced"),
+                ("DoS Protection", "Active"),
+                ("Port Scan Detection", "Active"),
+                ("IP Reputation", "Active" if self.use_threat_intel else "Disabled"),
+                ("Blacklist Enforcement", "Active"),
+                ("Packet Filtering", "Active")
+            ]
+            
+            for module, status in protection_modules:
+                status_color = Fore.GREEN if status in ["Active", "Enhanced"] else Fore.YELLOW
+                print(f"{Fore.BLUE}[*] {module}: {status_color}{status}{Style.RESET_ALL}")
+            
+            # Current statistics summary
+            print(f"\n{Fore.YELLOW}=== Current Statistics ==={Style.RESET_ALL}")
             print(f"Total Packets: {self.stats['total_packets']}")
             print(f"Blocked Packets: {self.stats['blocked_packets']}")
             print(f"Attacks Detected: {self.stats['attacks_detected']}")
-            print(f"Active Blocks: {len(self.blocked_ips)}")
+            
+            # Attack breakdown
+            attacks = [
+                ("SYN Floods", self.stats.get('syn_floods', 0)),
+                ("UDP Floods", self.stats.get('udp_floods', 0)),
+                ("ICMP Floods", self.stats.get('icmp_floods', 0)),
+                ("Port Scans", self.stats.get('port_scans', 0))
+            ]
+            
+            if any(count > 0 for _, count in attacks):
+                print(f"\n{Fore.RED}=== Attack Breakdown ==={Style.RESET_ALL}")
+                for attack_type, count in attacks:
+                    if count > 0:
+                        print(f"{Fore.RED}[!] {attack_type}: {count}{Style.RESET_ALL}")
+            
+            # Block information
+            print(f"\n{Fore.CYAN}=== Block Information ==={Style.RESET_ALL}")
+            print(f"Blacklisted IPs: {len(self.blacklist)}")
+            print(f"Temporary Blocks: {len(self.blocked_ips) - len(self.blacklist)}")
+            print(f"Total Active Blocks: {len(self.blocked_ips)}")
+            
+            # Recent alerts summary if available
+            if hasattr(self, 'recent_alerts') and self.recent_alerts:
+                print(f"\n{Fore.YELLOW}=== Recent Alerts ==={Style.RESET_ALL}")
+                for i, alert in enumerate(self.recent_alerts[:3], 1):
+                    timestamp, alert_type, message = alert
+                    alert_time = datetime.fromtimestamp(timestamp).strftime('%H:%M:%S')
+                    print(f"{i}. [{alert_time}] {Fore.RED}{alert_type}{Style.RESET_ALL}: {message}")
         else:
             print(f"\n{Fore.RED}[!] Protection Status: INACTIVE{Style.RESET_ALL}")
             print(f"\n{Fore.YELLOW}Use 'Start Protection' to enable network protection.{Style.RESET_ALL}")
