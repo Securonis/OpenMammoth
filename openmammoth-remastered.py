@@ -6741,6 +6741,9 @@ class OpenMammoth:
             if not hasattr(self, 'udp_flood_tracker'):
                 self.udp_flood_tracker = {}
                 self.udp_port_tracker = {}
+            
+            # Always ensure last_udp_cleanup exists
+            if not hasattr(self, 'last_udp_cleanup'):
                 self.last_udp_cleanup = current_time
             
             # Track by source IP
