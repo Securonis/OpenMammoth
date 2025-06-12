@@ -5996,8 +5996,7 @@ class OpenMammoth:
         """Check if IP is in threat intelligence database"""
         return ip in self.threat_intel_db
 
-    def check_ip_reputation(self, ip):
-        """Gelişmiş IP itibar kontrolü ve tehdit istihbaratı entegrasyonu"""
+    def check_ip_reputation(self, ip)
         # Initialize reputation tracking if not exists
         if not hasattr(self, 'reputation_cache'):
             self.reputation_cache = {}
