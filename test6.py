@@ -5996,7 +5996,8 @@ class OpenMammoth:
         """Check if IP is in threat intelligence database"""
         return ip in self.threat_intel_db
 
-    def check_ip_reputation(self, ip)
+    def check_ip_reputation(self, ip):
+        """Gelişmiş IP itibar kontrolü ve tehdit istihbaratı entegrasyonu"""
         # Initialize reputation tracking if not exists
         if not hasattr(self, 'reputation_cache'):
             self.reputation_cache = {}
@@ -6660,6 +6661,22 @@ class OpenMammoth:
             
         return False
 
+    def is_private_ip(self, ip):
+        """Check if an IP address is in a private range"""
+        try:
+            if not ip or not isinstance(ip, str):
+                return False
+                
+            # Convert to IPv4Address object for easy comparison
+            ip_obj = ipaddress.IPv4Address(ip)
+            
+            # Check if IP is in private ranges
+            return ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+            
+        except Exception as e:
+            logging.error(f"Error checking if IP is private: {str(e)}")
+            return False
+    
     def get_available_interfaces(self):
         """Get available network interfaces"""
         interfaces = []
