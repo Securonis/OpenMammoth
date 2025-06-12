@@ -6661,6 +6661,58 @@ class OpenMammoth:
             
         return False
 
+    def get_available_interfaces(self):
+        """Get available network interfaces"""
+        interfaces = []
+        try:
+            # Use ip command to get interface information
+            ip_output = subprocess.check_output(['ip', 'addr', 'show'], text=True)
+            current_interface = None
+            
+            for line in ip_output.split('\n'):
+                # Match interface line
+                if line and not line.startswith(' '):
+                    interface_match = re.match(r'\d+:\s+([^:@]+)[:.@]', line)
+                    if interface_match:
+                        current_interface = {
+                            'name': interface_match.group(1),
+                            'ip': '',
+                            'mac': '',
+                            'status': 'DOWN'
+                        }
+                        if 'UP' in line:
+                            current_interface['status'] = 'UP'
+                        interfaces.append(current_interface)
+                
+                # Match IP address line
+                elif current_interface and 'inet ' in line:
+                    ip_match = re.search(r'inet\s+([0-9.]+)/', line)
+                    if ip_match:
+                        current_interface['ip'] = ip_match.group(1)
+                
+                # Match MAC address line
+                elif current_interface and 'link/ether' in line:
+                    mac_match = re.search(r'link/ether\s+([0-9a-fA-F:]+)', line)
+                    if mac_match:
+                        current_interface['mac'] = mac_match.group(1)
+
+            # Filter out interfaces without IP addresses (except lo)
+            interfaces = [iface for iface in interfaces if iface['ip'] or iface['name'] == 'lo']
+            
+            if not interfaces:
+                logging.warning("No network interfaces found with IP addresses")
+            else:
+                logging.info(f"Found {len(interfaces)} network interfaces")
+                
+            return interfaces
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error running ip command: {str(e)}")
+            return []
+        except Exception as e:
+            logging.error(f"Error getting network interfaces: {str(e)}")
+            return []
+
 def main():
     if os.geteuid() != 0:
         print(f"{Fore.RED}Error: This program must be run as root.{Style.RESET_ALL}")
