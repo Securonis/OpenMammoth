@@ -6676,6 +6676,63 @@ class OpenMammoth:
         except Exception as e:
             logging.error(f"Error checking if IP is private: {str(e)}")
             return False
+            
+    def _check_sequence_anomaly(self, src_ip, seq_num, current_time):
+        """Check for TCP sequence number anomalies that could indicate spoofing or session hijacking"""
+        try:
+            # Initialize sequence tracking for this IP if not exists
+            if not hasattr(self, 'seq_tracker'):
+                self.seq_tracker = {}
+                
+            if src_ip not in self.seq_tracker:
+                self.seq_tracker[src_ip] = {
+                    'last_seq': seq_num,
+                    'last_time': current_time,
+                    'anomalies': 0,
+                    'seq_history': []
+                }
+                return
+                
+            # Get tracking data for this IP
+            tracker = self.seq_tracker[src_ip]
+            
+            # Add to sequence history (keep last 10)
+            tracker['seq_history'].append(seq_num)
+            if len(tracker['seq_history']) > 10:
+                tracker['seq_history'].pop(0)
+                
+            # Check time between packets
+            time_diff = current_time - tracker['last_time']
+            
+            # Calculate sequence difference
+            seq_diff = abs(seq_num - tracker['last_seq'])
+            
+            # Check for anomalies
+            if time_diff < 0.1 and seq_diff > 1000000000:  # Large jump in short time
+                tracker['anomalies'] += 1
+                logging.warning(f"TCP sequence anomaly from {src_ip}: large jump {seq_diff} in {time_diff:.4f}s")
+                
+                # Alert if multiple anomalies detected
+                if tracker['anomalies'] >= 3:
+                    with self.stats_lock:
+                        if 'sequence_anomalies' not in self.stats:
+                            self.stats['sequence_anomalies'] = 0
+                        self.stats['sequence_anomalies'] += 1
+                    
+                    print(f"{Fore.RED}[!] TCP sequence number manipulation detected from: {src_ip}{Style.RESET_ALL}")
+                    logging.warning(f"TCP sequence manipulation detected from {src_ip}: {tracker['anomalies']} anomalies")
+                    
+                    # Consider blocking if severe
+                    if tracker['anomalies'] >= 5 and self.protection_level >= 2:
+                        self.block_ip(src_ip, "TCP sequence manipulation", 300)  # Block for 5 minutes
+            
+            # Update tracking
+            tracker['last_seq'] = seq_num
+            tracker['last_time'] = current_time
+            
+        except Exception as e:
+            logging.error(f"Error checking sequence anomaly: {str(e)}")
+            pass
     
     def get_available_interfaces(self):
         """Get available network interfaces"""
